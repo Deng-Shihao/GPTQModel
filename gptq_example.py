@@ -2,7 +2,7 @@ from datasets import load_dataset
 from gptqmodel import GPTQModel, QuantizeConfig
 
 model_id = "Qwen/Qwen3-0.6B"
-quant_path = "./quantized_models/Qwen3-0.6B-gptqmodel-4bit"
+quant_path = "./quantized_models/Qwen3-0.6B-gptq-4bit"
 
 calibration_dataset = load_dataset(
     "allenai/c4",
