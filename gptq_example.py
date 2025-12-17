@@ -1,3 +1,5 @@
+# PYTHON_GIL=0 python gptq_example.py
+
 from datasets import load_dataset
 from gptqmodel import GPTQModel, QuantizeConfig
 
@@ -15,6 +17,6 @@ quant_config = QuantizeConfig(bits=4, group_size=128)
 model = GPTQModel.load(model_id, quant_config)
 
 # increase `batch_size` to match gpu/vram specs to speed up quantization
-model.quantize(calibration_dataset, batch_size=1)
+model.quantize(calibration_dataset, batch_size=24)
 
 model.save(quant_path)
