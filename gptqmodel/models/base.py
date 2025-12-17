@@ -391,7 +391,7 @@ class BaseQModel(nn.Module):
             [name for name in block if NOT_QUANTIZE_FLAG not in name]
             for block in layer_modules
         ]
-        layer_modules = [block for block in layer_modules if block]  # 去掉空 block
+        layer_modules = [block for block in layer_modules if block]  # Drop empty blocks
 
         if getattr(quantize_config, "dynamic", None):
             new_layer_modules = []

@@ -321,8 +321,8 @@ class QuantizeConfig():
 
         if self.dynamic is not None:
             self.dynamic = {
-                **{k: v for k, v in self.dynamic.items() if k.startswith('-')},  # 先添加以 "-" 开头的键
-                **{k: v for k, v in self.dynamic.items() if not k.startswith('-')}  # 然后添加其他键
+                **{k: v for k, v in self.dynamic.items() if k.startswith('-')},  # Add keys starting with "-" first
+                **{k: v for k, v in self.dynamic.items() if not k.startswith('-')}  # Then add the remaining keys
             }
 
             for layer, layer_dict in self.dynamic.items():
