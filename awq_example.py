@@ -11,7 +11,7 @@ calibration_dataset = load_dataset(
     split="train"
   ).select(range(1024))["text"]
 
-quant_config = QuantizeConfig(bits=4, group_size=128, method=METHOD.AWQ)
+quant_config = QuantizeConfig(bits=4, group_size=128, quant_method=METHOD.AWQ)
 
 model = GPTQModel.load(model_id, quant_config)
 
