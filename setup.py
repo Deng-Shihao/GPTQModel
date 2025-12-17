@@ -11,7 +11,6 @@ from pathlib import Path
 from shutil import rmtree
 
 from setuptools import find_namespace_packages, find_packages, setup
-from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
 
 CUTLASS_VERSION = "3.5.0"
@@ -381,45 +380,6 @@ if not TORCH_CUDA_ARCH_LIST and CUDA_ARCH_LIST:
 version_vars = {}
 exec("exec(open('gptqmodel/version.py').read()); version=__version__", {}, version_vars)
 gptqmodel_version = version_vars["version"]
-
-# -----------------------------
-# Prebuilt wheel download config
-# -----------------------------
-# Default template (GitHub Releases), can be overridden via env.
-DEFAULT_WHEEL_URL_TEMPLATE = "https://github.com/ModelCloud/GPTQModel/releases/download/{tag_name}/{wheel_name}"
-WHEEL_URL_TEMPLATE = os.environ.get("GPTQMODEL_WHEEL_URL_TEMPLATE")
-WHEEL_BASE_URL = os.environ.get("GPTQMODEL_WHEEL_BASE_URL")
-WHEEL_TAG = os.environ.get("GPTQMODEL_WHEEL_TAG")  # Optional override of release tag
-
-
-def _resolve_wheel_url(tag_name: str, wheel_name: str) -> str:
-    """
-    Build the final wheel URL based on:
-      1) GPTQMODEL_WHEEL_URL_TEMPLATE (highest priority)
-      2) GPTQMODEL_WHEEL_BASE_URL (append /{wheel_name})
-      3) DEFAULT_WHEEL_URL_TEMPLATE (GitHub Releases)
-    """
-    # Highest priority: explicit template
-    if WHEEL_URL_TEMPLATE:
-        tmpl = WHEEL_URL_TEMPLATE
-        # If {wheel_name} or {tag_name} not present, treat as base and append name.
-        if ("{wheel_name}" in tmpl) or ("{tag_name}" in tmpl):
-            return tmpl.format(tag_name=tag_name, wheel_name=wheel_name)
-        # Otherwise, join as base
-        if tmpl.endswith("/"):
-            return tmpl + wheel_name
-        return tmpl + "/" + wheel_name
-
-    # Next priority: base URL
-    if WHEEL_BASE_URL:
-        base = WHEEL_BASE_URL
-        if base.endswith("/"):
-            return base + wheel_name
-        return base + "/" + wheel_name
-
-    # Fallback: default GitHub template
-    return DEFAULT_WHEEL_URL_TEMPLATE.format(tag_name=tag_name, wheel_name=wheel_name)
-
 
 def _download_with_progress(url: str, dest_path: str, title: str = "Downloading") -> None:
     """Download url to dest_path with simple stdout progress updates."""
@@ -857,50 +817,6 @@ if BUILD_CUDA_EXT == "1":
 
 
 # ---------------------------
-# Cached wheel fetcher
-# ---------------------------
-
-class CachedWheelsCommand(_bdist_wheel):
-    def run(self):
-        # No implicit torch checks; allow explicit override via env
-        xpu_avail = _bool_env("XPU_AVAILABLE", False)
-        if FORCE_BUILD or xpu_avail:
-            return super().run()
-
-        python_version = f"cp{sys.version_info.major}{sys.version_info.minor}"
-
-        wheel_filename = f"gptqmodel-{gptqmodel_version}+{get_version_tag()}-{python_version}-{python_version}-linux_x86_64.whl"
-
-        # Allow tag override via env; default to "v{gptqmodel_version}"
-        tag_name = WHEEL_TAG if WHEEL_TAG else f"v{gptqmodel_version}"
-        wheel_url = _resolve_wheel_url(tag_name=tag_name, wheel_name=wheel_filename)
-
-        print(f"Resolved wheel URL: {wheel_url}\nwheel name={wheel_filename}")
-
-        try:
-            if not os.path.exists(self.dist_dir):
-                os.makedirs(self.dist_dir)
-
-            wheel_path = os.path.join(self.dist_dir, wheel_filename)
-
-            _download_with_progress(wheel_url, wheel_path, title="Downloading wheel")
-            print("Raw wheel path", wheel_filename)
-        except BaseException:
-            env_info = [f"python={python_version}", f"torch={TORCH_VERSION or 'unknown'}"]
-            if CUDA_VERSION:
-                env_info.append(f"cuda={CUDA_VERSION}")
-            if ROCM_VERSION:
-                env_info.append(f"rocm={ROCM_VERSION}")
-
-            print(
-                "Unable to match and download a precompiled wheel; entering slow manual build mode. "
-                f"Wheel match params: {', '.join(env_info)}. "
-                f"Fallback source build triggered for {wheel_url}"
-            )
-            super().run()
-
-
-# ---------------------------
 # setup()
 # ---------------------------
 print(f"CUDA {CUDA_ARCH_LIST}")
@@ -920,10 +836,6 @@ setup(
     packages=_packages,
     include_package_data=True,
     include_dirs=include_dirs,
-    cmdclass=(
-        {"bdist_wheel": CachedWheelsCommand, "build_ext": additional_setup_kwargs.get("cmdclass", {}).get("build_ext")}
-        if (BUILD_CUDA_EXT == "1" and additional_setup_kwargs)
-        else {"bdist_wheel": CachedWheelsCommand}
-    ),
+    cmdclass=additional_setup_kwargs.get("cmdclass", {}),
     ext_modules=additional_setup_kwargs.get("ext_modules", []),
 )
