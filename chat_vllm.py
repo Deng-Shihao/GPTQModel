@@ -66,6 +66,12 @@ def _parse_args() -> argparse.Namespace:
         default=False,
         help="Set trust_remote_code=True when loading the model",
     )
+    parser.add_argument(
+        "--max-seq-len",
+        type=int,
+        default=8192,
+        help="Maximum sequence length (vllm: max_model_len)",
+    )
     return parser.parse_args()
 
 
@@ -82,6 +88,7 @@ def main() -> None:
         model=args.model,
         tensor_parallel_size=args.tensor_parallel_size,
         trust_remote_code=args.trust_remote_code,
+        max_model_len=args.max_seq_len,
         disable_log_stats=False,
     )
     print(
@@ -91,6 +98,7 @@ def main() -> None:
         f"temperature={args.temperature} "
         f"top_p={args.top_p} "
         f"max_tokens={args.max_tokens} "
+        f"max_seq_len={args.max_seq_len} "
         f"warmup_steps={args.warmup_steps}",
         flush=True,
     )
