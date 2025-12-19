@@ -4,8 +4,8 @@ from datasets import load_dataset
 from gptqmodel import GPTQModel, QuantizeConfig
 from gptqmodel.quantization import FORMAT, METHOD
 
-model_id = "Qwen/Qwen3-0.6B"
-quant_path = "./quantized_models/Qwen3-0.6B-awq-4bit"
+model_id = "Qwen/Qwen3-4B-Thinking-2507"
+quant_path = "./quantized_models/Qwen3-4B-Thinking-2507-awq-4bit"
 
 calibration_dataset = load_dataset(
     "allenai/c4",
