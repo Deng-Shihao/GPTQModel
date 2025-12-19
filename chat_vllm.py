@@ -28,19 +28,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--warmup-steps",
         type=int,
-        default=2,
+        default=5,
         help="Number of warmup steps (0 to disable)",
     )
     parser.add_argument(
         "--warmup-max-tokens",
         type=int,
-        default=32,
+        default=64,
         help="Warmup max tokens",
     )
     parser.add_argument(
         "--temperature",
         type=float,
-        default=1.0,
+        default=0.9,
         help="Sampling temperature",
     )
     parser.add_argument(
@@ -61,54 +61,16 @@ def _parse_args() -> argparse.Namespace:
         help="System prompt",
     )
     parser.add_argument(
-        "--chat-template",
-        default=None,
-        help="Chat template (file path or literal template string); default: tokenizer/template auto",
-    )
-    parser.add_argument(
-        "--chat-template-content-format",
-        choices=["auto", "string", "openai"],
-        default="auto",
-        help="How to render message content inside the chat template",
-    )
-    thinking_group = parser.add_mutually_exclusive_group()
-    thinking_group.add_argument(
-        "--enable-thinking",
-        dest="enable_thinking",
-        action="store_true",
-        default=False,
-        help="Enable thinking in chat template (default: disabled)",
-    )
-    thinking_group.add_argument(
-        "--disable-thinking",
-        dest="enable_thinking",
-        action="store_false",
-        help="Disable thinking in chat template",
-    )
-    parser.add_argument(
         "--trust-remote-code",
         action="store_true",
         default=False,
         help="Set trust_remote_code=True when loading the model",
     )
-    parser.add_argument(
-        "--quantization",
-        default=None,
-        help="Override quantization (e.g. gptq, awq); default: auto",
-    )
-    parser.add_argument(
-        "--use-tqdm",
-        action="store_true",
-        default=False,
-        help="Show tqdm progress bars",
-    )
     return parser.parse_args()
 
 
 def main() -> None:
-    args = _parse_args()
-
-    chat_template_kwargs = {"enable_thinking": args.enable_thinking}
+    args = _parse_args() 
 
     sampling_params = SamplingParams(
         temperature=args.temperature,
@@ -120,7 +82,6 @@ def main() -> None:
         model=args.model,
         tensor_parallel_size=args.tensor_parallel_size,
         trust_remote_code=args.trust_remote_code,
-        quantization=args.quantization,
         disable_log_stats=False,
     )
     print(
@@ -130,7 +91,6 @@ def main() -> None:
         f"temperature={args.temperature} "
         f"top_p={args.top_p} "
         f"max_tokens={args.max_tokens} "
-        f"enable_thinking={args.enable_thinking} "
         f"warmup_steps={args.warmup_steps}",
         flush=True,
     )
@@ -153,9 +113,6 @@ def main() -> None:
                 warmup_messages,
                 sampling_params=warmup_sampling_params,
                 use_tqdm=False,
-                chat_template_kwargs=chat_template_kwargs,
-                chat_template=args.chat_template,
-                chat_template_content_format=args.chat_template_content_format,
             )
             step_elapsed_s = time.perf_counter() - step_t0
             step_gen_tokens = len(warmup_outputs[0].outputs[0].token_ids or [])
@@ -198,10 +155,7 @@ def main() -> None:
         outputs = llm.chat(
             messages,
             sampling_params=sampling_params,
-            use_tqdm=args.use_tqdm,
-            chat_template_kwargs=chat_template_kwargs,
-            chat_template=args.chat_template,
-            chat_template_content_format=args.chat_template_content_format,
+            use_tqdm=True,
         )
         elapsed_s = time.perf_counter() - t0
         assistant_text = outputs[0].outputs[0].text.strip()
