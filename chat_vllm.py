@@ -28,13 +28,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--warmup-steps",
         type=int,
-        default=5,
+        default=10,
         help="Number of warmup steps (0 to disable)",
     )
     parser.add_argument(
         "--warmup-max-tokens",
         type=int,
-        default=64,
+        default=128,
         help="Warmup max tokens",
     )
     parser.add_argument(
