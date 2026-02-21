@@ -634,7 +634,7 @@ class QuantizeConfig():
     static_groups: bool = field(default=False)
 
     # symmetric quantization toggle (True=symmetric, False=asymmetric).
-    sym: bool = field(default=True)
+    sym: bool = field(default=False)
 
     true_sequential: bool = field(default=True)
 
