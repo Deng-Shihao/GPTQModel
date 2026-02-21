@@ -18,8 +18,7 @@ import torch
 import transformers
 from safetensors import safe_open
 from safetensors.torch import save_file
-from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
-from transformers.models.auto.tokenization_auto import get_tokenizer_config
+from transformers import AutoConfig, ProcessorMixin
 from transformers.utils.generic import ContextManagers
 
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
@@ -497,23 +496,35 @@ def ModelWriter(cls):
 
         if self.tokenizer:
             self.tokenizer.save_pretrained(save_dir)
+            if isinstance(self.model_local_path, str) and self.model_local_path.strip():
+                source_tokenizer_config_path = os.path.join(self.model_local_path, "tokenizer_config.json")
+                target_tokenizer_config_path = os.path.join(save_dir, "tokenizer_config.json")
 
-            # Use source model's tokenizer_class for cross-version compatibility
-            # (transformers 5.0 save_pretrained writes "TokenizersBackend" which older versions can't load)
-            source_tokenizer_config = get_tokenizer_config(self.model_local_path)
-            source_tokenizer_class = source_tokenizer_config.get("tokenizer_class")
-
-            if source_tokenizer_class:
-                # fix https://github.com/huggingface/transformers/issues/35832
-                # if source tokenizer_class lacks "Fast" suffix but tokenizer is actually fast, add it
-                if (not source_tokenizer_class.endswith("Fast")) and isinstance(self.tokenizer.tokenizer, PreTrainedTokenizerFast):
-                    source_tokenizer_class = source_tokenizer_class + "Fast"
-
-                saved_tokenizer_config = get_tokenizer_config(save_dir)
-                if saved_tokenizer_config.get("tokenizer_class") != source_tokenizer_class:
-                    saved_tokenizer_config["tokenizer_class"] = source_tokenizer_class
-                    with open(os.path.join(save_dir, "tokenizer_config.json"), "w", encoding="utf-8") as f:
-                        json.dump(saved_tokenizer_config, f, indent=2, ensure_ascii=False)
+                if os.path.isfile(source_tokenizer_config_path):
+                    try:
+                        shutil.copy2(source_tokenizer_config_path, target_tokenizer_config_path)
+                        log.info(
+                            "Model: Reused source `tokenizer_config.json` from `%s`.",
+                            source_tokenizer_config_path,
+                        )
+                    except Exception as exc:
+                        log.warn(
+                            "Model: Failed to reuse source `tokenizer_config.json` from `%s`: %s. "
+                            "Keeping tokenizer-exported file.",
+                            source_tokenizer_config_path,
+                            exc,
+                        )
+                else:
+                    log.warn(
+                        "Model: Source `tokenizer_config.json` not found at `%s`. "
+                        "Keeping tokenizer-exported file.",
+                        source_tokenizer_config_path,
+                    )
+            else:
+                log.warn(
+                    "Model: `model_local_path` is empty; unable to locate source `tokenizer_config.json`. "
+                    "Keeping tokenizer-exported file."
+                )
 
 
     cls.save_quantized = save_quantized
