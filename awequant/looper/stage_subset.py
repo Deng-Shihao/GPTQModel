@@ -71,25 +71,12 @@ def _run_single_subset_pass(
     previous_processed_subset: Optional[Dict[str, NamedModule]] = None,
     subset_event_cb: Optional[Callable[..., None]] = None,
     return_outputs: bool = False,
-    disable_moe_hooks: bool = False,
 ) -> Tuple[Dict[str, NamedModule], Optional[List[List[torch.Tensor]]]]:
     """Execute forward and quantization for a specific subset/chunk."""
     
     handle = []
     subset_size = len(subset)
     
-    # Determine MoE block name for hook selection
-    moe_block_name = None
-    if looper.quant_model and hasattr(looper.quant_model, 'moe_lifecycle_hooks'):
-        hooks = looper.quant_model.moe_lifecycle_hooks
-        if hooks is not None:
-            moe_block = hooks.get_moe_block(module, looper.quant_model.__class__)
-            if moe_block is not None:
-                # Get the full name/path of the MoE block
-                for mod_name, mod in module.named_modules():
-                    if mod is moe_block:
-                        moe_block_name = mod_name
-                        break
 
     for idx, (name, m) in enumerate(subset.items()):
         # Register the forward hook that captures activations for quantization.
@@ -102,30 +89,17 @@ def _run_single_subset_pass(
         if hook_source is None:
             hook_source = str(name)
 
-        # Determine if this module is part of MoE block (needs pre-hook to avoid StopForward)
-        is_moe_module = moe_block_name and name.startswith(moe_block_name + ".")
-
         if hasattr(subset[name], 'forward_hook'):
             original_hook = processor.pre_process_fwd_hook(name)
-            # Use pre-hook for MoE modules to fire before StopForward
-            if is_moe_module:
-                subset[name].forward_hook = looper._masked_pre_hook_wrapper(processor, original_hook, hook_source)
-            else:
-                subset[name].forward_hook = looper._masked_hook_wrapper(processor, original_hook, hook_source)
+            subset[name].forward_hook = looper._masked_hook_wrapper(processor, original_hook, hook_source)
             enable_stop = processor.fwd_after_process or getattr(processor, "subset_forward_early_stop", False)
             if is_last and enable_stop:
                 subset[name].forward_hook_last = True
         else:
             original_hook = processor.pre_process_fwd_hook(name)
-            # Use pre-hook registration for MoE modules
-            if is_moe_module:
-                handle.append(subset[name].register_forward_hook(
-                    looper._masked_pre_hook_wrapper(processor, original_hook, hook_source)
-                ))
-            else:
-                handle.append(subset[name].register_forward_hook(
-                    looper._masked_hook_wrapper(processor, original_hook, hook_source)
-                ))
+            handle.append(subset[name].register_forward_hook(
+                looper._masked_hook_wrapper(processor, original_hook, hook_source)
+            ))
 
     if DEBUG_ON and logger.isEnabledFor(logging.DEBUG):
         if is_awq_processor:
@@ -178,11 +152,6 @@ def _run_single_subset_pass(
         )
 
     try:
-        # Set the current subset for MoE lifecycle hooks
-        if disable_moe_hooks:
-            looper._current_subset = None
-        else:
-            looper._current_subset = subset
         forward_outputs = looper._run_forward_batches(
             module=module,
             processor=processor,
@@ -685,7 +654,6 @@ def run_subset_stage(
                 previous_processed_subset=previous_processed_subset,
                 subset_event_cb=None,
                 return_outputs=True,
-                disable_moe_hooks=True,
             )
              if new_layer_inputs is not None:
                  layer_inputs = new_layer_inputs
