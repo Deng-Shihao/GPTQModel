@@ -23,7 +23,6 @@ from ..models.writer import (PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_
 from ..nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
 from ..nn_modules.qlinear.gemv_awq import AwqGEMVQuantLinear
 from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastQuantLinear, LLMAwqQuantLinear
-from ..nn_modules.qlinear.marlin_awq import AwqMarlinQuantLinear
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_name, get_op_by_name
 from ..quantization.awq.utils.utils import get_best_device
@@ -127,9 +126,6 @@ class AWQProcessor(LoopProcessor):
             return AwqGEMVFastQuantLinear
         if fmt == FORMAT.LLM_AWQ:
             return LLMAwqQuantLinear
-        # We do not allow saving to marlin format
-        # if fmt == FORMAT.MARLIN:
-        #     return AwqMarlinQuantLinear
         raise ValueError(f"METHOD.AWQ does not support this FORMAT: {format_value}")
 
     def _resolve_qlinear_kernel(self, module_name: Optional[str] = None):
@@ -1365,7 +1361,7 @@ class AWQProcessor(LoopProcessor):
         # cleanup all memory or states vars persistently added by this processor
         module.stream_sync()
         with (self.lock):
-            # if calculate_w_wq_diff is enabled (eora), we need to revert our original wq
+            # if calculate_w_wq_diff is enabled, we need to revert original wq
             if self.calculate_w_wq_diff:
                 module.weight.data = module.state.pop("wq").to(CPU)
 
@@ -1454,7 +1450,7 @@ class AWQProcessor(LoopProcessor):
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:
         if self.calibration_dataset is None:
-            raise ValueError("GPTQProcessor's calibration_dataset must be provided.")
+            raise ValueError("AWQProcessor calibration_dataset must be provided.")
         else:
             return True
 

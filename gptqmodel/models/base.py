@@ -37,13 +37,9 @@ except Exception:  # pragma: no cover - datasets may not be installed
     HFIterableDataset = None
 
 from .. import DEVICE_THREAD_POOL
-from ..adapter.adapter import Adapter
 from ..nn_modules.qlinear import BaseQuantLinear
-from ..nn_modules.qlinear.lookahead import configure_default_lookahead
-from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, METHOD, QUANTIZE_BLACK_LIST, GcMode, VramStrategy, dynamic_get
-from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.backend import BACKEND
 from ..utils.calibration import prepare_calibration_dataset
 from ..utils.device import get_device
@@ -148,7 +144,7 @@ class BaseQModel(nn.Module):
     module_tree_overrides: dict[METHOD, List[str]] = None
 
     # Strict=True -> all layer_modules must exists in model
-    # Some models (deepseek2-lite) dynamically create lora modules based on config.rank
+    # Some models (deepseek2-lite) dynamically create optional modules based on config.rank
     layer_modules_strict = True
 
     pre_lm_head_norm_module: str = None
@@ -282,8 +278,7 @@ class BaseQModel(nn.Module):
 
         self._turtle_lock = threading.RLock()
 
-        # compat: state to assist in checkpoint_format gptq(v1) to gptq_v2 conversion
-        # stores all per-layer quant stats such as avg loss and processing time
+        # stores per-layer quant stats such as avg loss and processing time
         self.quant_log = []
 
         if self.require_load_processor:
@@ -292,19 +287,6 @@ class BaseQModel(nn.Module):
         # apply patching of broken trust_remote_code models here
         if self.require_monkeypatch:
             self.monkey_patch()
-
-        # hack: circular import
-        from ..adapter.adapter import Lora
-
-        # check adapter load and print info so users knows lora(s) are applied
-        if quantize_config and isinstance(self.quantize_config.adapter, Lora):
-            loaded_loras = 0
-            qmodules = find_modules(self.model, layers=[BaseQuantLinear])
-            for name, m in qmodules.items():
-                if all(hasattr(m.adapter, name) for name in Lora.parameter_keys()):
-                    loaded_loras += 1
-
-            log.info(f"Adapter: `{loaded_loras}` EoRA/Lora adapters loaded for `{len(qmodules)}` modules.")
 
         # print kernel info:
         log.info(f"Kernel: loaded -> `[{', '.join(cls.__name__ for cls in self.kernels())}]`")
@@ -615,9 +597,6 @@ class BaseQModel(nn.Module):
         batch_size: int = 1,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
         backend: Optional[BACKEND] = BACKEND.AUTO,
-        # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
-        adapter: Adapter = None,
-        adapter_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
         # minimum length of calibration data, default is 10
         calibration_data_min_length: int = 10,
         calibration_concat_separator: Optional[str] = None,
@@ -640,20 +619,17 @@ class BaseQModel(nn.Module):
                 f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
             )
 
+        if self.quantize_config.quant_method != METHOD.AWQ:
+            raise ValueError("This project is AWQ-only. Please set `quant_method=METHOD.AWQ`.")
+
         if not self.support_batch_quantize:
             log.warn("Quantize: batch_size overridden by model class definition to `disabled`")
             batch_size = 1 # but actually disabled
 
-        if self.quantize_config.format == FORMAT.MARLIN:
-            raise ValueError(
-                "FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
-            )
-
-        if self.quantize_config.quant_method == METHOD.AWQ:
-            if self.quantize_config.format in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
-                # AWQ GEMV_FAST / LLM_AWQ only supports pack_dtype is torch.int16
-                log.info("Quantize Model: Auto fix `pack_dtype` to `torch.int16`")
-                self.quantize_config.pack_dtype = torch.int16
+        if self.quantize_config.format in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
+            # AWQ GEMV_FAST / LLM_AWQ only supports pack_dtype is torch.int16
+            log.info("Quantize Model: Auto fix `pack_dtype` to `torch.int16`")
+            self.quantize_config.pack_dtype = torch.int16
 
         if self.support_batch_quantize is False:
             batch_size = 1
@@ -665,19 +641,14 @@ class BaseQModel(nn.Module):
 
         preferred_backend = requested_backend
         if preferred_backend in (None, BACKEND.AUTO):
-            if self.quantize_config.quant_method == METHOD.AWQ:
-                if self.quantize_config.format == FORMAT.GEMM:
-                    preferred_backend = BACKEND.TORCH_AWQ
-                elif self.quantize_config.format == FORMAT.GEMV:
-                    preferred_backend = BACKEND.GEMV
-                elif self.quantize_config.format in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
-                    preferred_backend = BACKEND.GEMV_FAST
-                else:
-                    raise ValueError(f"Unsupported FORMAT: `{self.quantize_config.format}` with `METHOD.AWQ`")
-            elif self.quantize_config.quant_method == METHOD.QQQ:
-                preferred_backend = BACKEND.QQQ
+            if self.quantize_config.format == FORMAT.GEMM:
+                preferred_backend = BACKEND.TORCH_AWQ
+            elif self.quantize_config.format == FORMAT.GEMV:
+                preferred_backend = BACKEND.GEMV
+            elif self.quantize_config.format in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
+                preferred_backend = BACKEND.GEMV_FAST
             else:
-                preferred_backend = BACKEND.TORCH
+                raise ValueError(f"Unsupported FORMAT: `{self.quantize_config.format}` with `METHOD.AWQ`")
 
         # Validate quant linear before quantization starts
         _ = select_quant_linear(
@@ -704,21 +675,7 @@ class BaseQModel(nn.Module):
                 raise ValueError(
                     f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
 
-        if self.quantize_config.format == FORMAT.BITBLAS:
-            from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
-            if BITBLAS_AVAILABLE is False:
-                raise ValueError(BITBLAS_INSTALL_HINT)
-
-        # overwrite quantize_config.adapter
-        if adapter is not None:
-            self.quantize_config.adapter = adapter
-
-        from ..adapter.adapter import Lora
-        from ..looper.eora_processor import EoraProcessor
         from ..looper.module_looper import ModuleLooper
-
-        # has lora process
-        needs_lora = isinstance(self.quantize_config.adapter, Lora)
 
         args = {
             "tokenizer": self.tokenizer,
@@ -729,7 +686,7 @@ class BaseQModel(nn.Module):
             "calibration_sort": calibration_sort,
             "calibration_concat_separator": calibration_concat_separator,
             "batch_size": batch_size,
-            "calculate_w_wq_diff": needs_lora,  # lora needs original w - wq delta
+            "calculate_w_wq_diff": False,
         }
 
         self.qlinear_kernel = select_quant_linear(
@@ -747,95 +704,24 @@ class BaseQModel(nn.Module):
                 quant_method=self.quantize_config.quant_method,
             )
 
-        # rotate model
-        if self.quantize_config.rotation:
-            from gptqmodel.models.definitions.llama import LlamaQModel
-            from gptqmodel.models.definitions.qwen2 import Qwen2QModel
-            if not isinstance(self, (LlamaQModel, Qwen2QModel)):
-                raise ValueError(f"rotation only supports: llama/qwen2 model, "
-                                    f"current model is {self.__class__.__name__}")
-
-            if self.model.config.tie_word_embeddings:
-                log.info("Rotation requires word embeddings to be untied. Untying.")
-                self.model.config.tie_word_embeddings = False
-                lm_head, _ = get_module_by_name_prefix(self.model, self.lm_head)
-                lm_head.weight = nn.Parameter(lm_head.weight.data.clone())
-
-            module_name_args = {
-                "layers_node": self.extract_layers_node(),
-                "lm_head_name": self.lm_head
-            }
-            self.model = fuse_layer_norms(model=self.model,
-                                            pre_lm_head_norm_module_name=self.pre_lm_head_norm_module,
-                                            **module_name_args)
-
-            # MPS does not support float64.
-            rotation_device = self.quantize_config.device if self.quantize_config.device != DEVICE.MPS else DEVICE.CPU
-            self.model, _ = rotate_model(model=self.model, rotate_mode=self.quantize_config.rotation,
-                                            device=rotation_device, **module_name_args)
-
-        # init processor with default GPTQ processor
+        # AWQ-only processor pipeline
         from ..looper.tensorparallel_weight_processor import TensorParallelWeightProcessor
 
-        if self.quantize_config.quant_method == METHOD.QQQ:
-            from ..looper.qqq_processor import QQQProcessor
+        from ..looper.awq_processor import AWQProcessor
 
-            quantize_processor = [
-                TensorParallelWeightProcessor(**args),
-                QQQProcessor(**args),
-            ]
-        elif self.quantize_config.quant_method == METHOD.AWQ:
-            from ..looper.awq_processor import AWQProcessor
+        os.environ["AWQ_BATCH_SIZE"] = str(batch_size)
 
-            os.environ["AWQ_BATCH_SIZE"] = str(batch_size)
+        awq_args = dict(args)
+        awq_args["gptq_model"] = self
+        awq_args["model"] = self.model
+        awq_args["batch_size"] = batch_size
 
-            # if self.model.config.model_type not in AWQ_CAUSAL_LM_MODEL_MAP.keys():
-            #     raise TypeError(f"{self.model.config.model_type} isn't supported yet.")
-
-            awq_args = dict(args)
-            awq_args["gptq_model"] = self
-            awq_args["model"] = self.model
-            awq_args["batch_size"] = batch_size
-
-            quantize_processor = [
-                TensorParallelWeightProcessor(**args),
-                AWQProcessor(**awq_args),
-            ]
-        else:
-            from ..looper.gptq_processor import GPTQProcessor
-
-            quantize_processor = [
-                TensorParallelWeightProcessor(**args),
-                GPTQProcessor(**args),
-            ]
-
-        if self.quantize_config.gptaq is not None:
-            from ..looper.native_processor import NativeProcessor
-
-            # During the deepcopy process, self.prepare_dataset will be deeply copied along with self. However,
-            # self has a threading.RLock() , which is not serializable.
-            args_to_copy = {k: v for k, v in args.items() if k != "prepare_dataset_func"}
-            args_clone = copy.deepcopy(args_to_copy)
-            args_clone["prepare_dataset_func"] = args["prepare_dataset_func"]
-
-            args_clone.pop("calculate_w_wq_diff", None)
-            quantize_processor.insert(0, NativeProcessor(**args_clone))
+        quantize_processor = [
+            TensorParallelWeightProcessor(**args),
+            AWQProcessor(**awq_args),
+        ]
 
         processors = quantize_processor
-        # Append EoRA processor for lora adapter
-        if needs_lora:
-            processors.append(
-                EoraProcessor(
-                    tokenizer=self.tokenizer,
-                    qcfg=self.quantize_config,
-                    calibration=adapter_calibration_dataset if adapter_calibration_dataset is not None else calibration,
-                    prepare_dataset_func=self.prepare_dataset,
-                    calibration_concat_size=calibration_concat_size,
-                    calibration_sort=calibration_sort,
-                    calibration_concat_separator=calibration_concat_separator,
-                    batch_size=batch_size,
-                )
-            )
 
         # prepare processor worker (looper)
         module_looper = ModuleLooper(self, processors=processors)
@@ -859,75 +745,6 @@ class BaseQModel(nn.Module):
             timer.flush()
 
         return result
-
-    def _eora_generate(
-        self,
-        # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
-        adapter: Adapter,
-        quantized_modules: Dict[str, TorchQuantLinear],
-        calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
-        calibration_dataset_concat_size: Optional[int] = None,
-        calibration_dataset_sort: Optional[str] = None,
-        batch_size: int = 1,
-        tokenizer: Optional[PreTrainedTokenizerBase] = None,
-        calibration_concat_separator: Optional[str] = None,
-    ):
-        if self.quantized:
-            raise EnvironmentError("eora_generate() is called a model that is already quantized")
-
-        # Use the provided tokenizer if one is passed to quantize()
-        if tokenizer is not None:
-            if isinstance(tokenizer, PreTrainedTokenizerBase):
-                # TODO FIX ME...this is a bug
-                self.tokenizer = Tokenicer.load(tokenizer, trust_remote_code=self.trust_remote_code)
-            else:
-                raise ValueError(
-                    f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
-
-        from ..adapter.adapter import Lora
-        from ..looper.dequantize_processor import DequantizeProcessor
-        from ..looper.eora_processor import EoraProcessor
-        from ..looper.module_looper import ModuleLooper
-        from ..looper.tensorparallel_weight_processor import TensorParallelWeightProcessor
-
-        self.quantize_config.adapter = adapter
-
-        assert isinstance(self.quantize_config.adapter, Lora)
-
-        # init processor with EoRA processor
-        processors = [
-            TensorParallelWeightProcessor(
-                tokenizer=self.tokenizer,
-                qcfg=self.quantize_config,
-                calibration=calibration_dataset,
-                prepare_dataset_func=self.prepare_dataset,
-                calibration_concat_size=calibration_dataset_concat_size,
-                calibration_sort=calibration_dataset_sort,
-                calibration_concat_separator=calibration_concat_separator,
-                batch_size=batch_size,
-            ),
-            DequantizeProcessor(
-                quantized_modules=quantized_modules,
-            ),
-            EoraProcessor(
-                tokenizer=self.tokenizer,
-                qcfg=self.quantize_config,
-                calibration=calibration_dataset,
-                prepare_dataset_func=self.prepare_dataset,
-                calibration_concat_size=calibration_dataset_concat_size,
-                calibration_sort=calibration_dataset_sort,
-                calibration_concat_separator=calibration_concat_separator,
-                batch_size=batch_size,
-            ),
-        ]
-
-        # prepare processor worker (looper)
-        module_looper = ModuleLooper(model=self, processors=processors)
-
-        module_looper.loop()
-
-        self.eora_save(save_dir=adapter.path, model_save_dir=self.model_local_path)
-        return
 
     def to(self, device: Union[str, torch.device]):
         if hasattr(self.model, "to"):
@@ -965,8 +782,7 @@ class BaseQModel(nn.Module):
                     private: bool = False,
                     exists_ok: bool = False,  # set to true if repo already exists
                     token: Optional[str] = None):
-
-        log.error("`push_to_hub()` api cannot be used on the model instance. Please use `GPTQModel.push_to_hub()` static api instead.")
+        raise NotImplementedError("AWQ-only quantization build does not include Hub upload helpers.")
 
     def save(
             self,
@@ -974,7 +790,6 @@ class BaseQModel(nn.Module):
             safetensors_metadata: Optional[Dict[str, str]] = None,
             max_shard_size: Optional[Union[int, str]] = DEFAULT_MAX_SHARD_SIZE,
             meta_quantizer: Optional[str] = None,
-            eora_path: Optional[str] = None,
             **kwargs,
     ):
         timer = getattr(self, "quant_region_timer", None)
@@ -989,8 +804,7 @@ class BaseQModel(nn.Module):
                     save_dir=save_dir,
                     safetensors_metadata=safetensors_metadata,
                     max_shard_size=max_shard_size,
-                    meta_quantizer=meta_quantizer,
-                    eora_path=eora_path)
+                    meta_quantizer=meta_quantizer)
 
                 # overwrite quant_override_files
                 for name, value in self.quant_override_files.items():
@@ -1028,17 +842,8 @@ class BaseQModel(nn.Module):
         return list(loaded_kernels)
 
     def _auto_configure_lookahead(self) -> None:
-        if not isinstance(self.model, nn.Module):
-            return
-
-        quant_modules = [module for module in self.model.modules() if isinstance(module, TorchQuantLinear)]
-        if not quant_modules:
-            return
-
-        if not any(getattr(module, "_lookahead_enabled", False) for module in quant_modules):
-            return
-
-        configure_default_lookahead(self.model)
+        # AWQ-only path does not rely on GPTQ torch lookahead prefetch.
+        return
 
     def compile(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         log.warn("Deprecation: `model.compile()` is deprecated. Please use `model.optimize()` instead.")
@@ -1054,9 +859,6 @@ class BaseQModel(nn.Module):
             log.warn("To use compile(), you need to have torch version >= 2.6.0, please "
                            "upgrade it by `pip install -U torch torchaudio torchvision`")
             return self
-
-        # needed by eora
-        # torch._dynamo.config.capture_scalar_outputs = True
 
         log.info(f"Compiling qlinear modules with backend: `{backend}`, mode: `{mode}`")
         modules = find_modules(self.model, layers=[BaseQuantLinear])
@@ -1086,17 +888,13 @@ class BaseQModel(nn.Module):
                host: str = "0.0.0.0",
                port: int = 80,
                async_mode: bool = False):
-        from ..utils.openai_server import OpenAiServer
-        self.server = OpenAiServer(model=self)
-        self.server.start(host=host, port=port, async_mode=async_mode)
+        raise NotImplementedError("AWQ-only quantization build does not include serving.")
 
     def serve_shutdown(self):
-        if self.server is not None:
-            self.server.shutdown()
+        return
 
     def serve_wait_until_ready(self, timeout: int = 30, check_interval: float = 0.1):
-        if self.server is not None:
-            self.server.wait_until_ready(timeout=timeout, check_interval=check_interval)
+        return
 
     def before_model_load(self, load_quantized_model):
         pass
@@ -1843,8 +1641,8 @@ class BaseQModel(nn.Module):
     def _auto_detect_module_tree(self, model: PreTrainedModel, quant_method: METHOD):
         log.warn("Model not yet support, attempting Module Tree AutoCompat...")
 
-        if quant_method != METHOD.GPTQ:
-            log.warn(f"Module Tree AutoCompat: Failed, quant_method={quant_method}, only support GPTQ")
+        if quant_method != METHOD.AWQ:
+            log.warn(f"Module Tree AutoCompat: Failed, quant_method={quant_method}, only support AWQ")
             return None
 
         def _get(path):

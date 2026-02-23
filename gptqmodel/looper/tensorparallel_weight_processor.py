@@ -11,13 +11,25 @@ import math
 from typing import Dict, Optional
 
 import torch
+import transformers
 
-from ..quantization.gptq import get_number_of_rows_and_cols
 from ..utils.logger import setup_logger
 from .loop_processor import LoopProcessor
 from .named_module import NamedModule
 
 log = setup_logger()
+
+
+def _get_number_of_rows_and_cols(layer: torch.nn.Module) -> tuple[int, int]:
+    if isinstance(layer, NamedModule):
+        layer = layer.module
+
+    if isinstance(layer, transformers.Conv1D):
+        # transformers.Conv1D stores weights as (in_features, out_features)
+        return layer.weight.shape[1], layer.weight.shape[0]
+
+    # torch Linear/Conv store as (out_features, in_features)
+    return layer.weight.shape[0], math.prod(layer.weight.shape[1:])
 
 
 class TensorParallelWeightProcessor(LoopProcessor):
@@ -99,7 +111,7 @@ class TensorParallelWeightProcessor(LoopProcessor):
         return "tp-pre-pad"
 
     def _compute_padding(self, module: torch.nn.Module, named: NamedModule) -> Dict[str, int]:
-        rows, columns = get_number_of_rows_and_cols(named)
+        rows, columns = _get_number_of_rows_and_cols(named)
         pad_cols = (self._target_multiple - (columns % self._target_multiple)) % self._target_multiple
 
         return {

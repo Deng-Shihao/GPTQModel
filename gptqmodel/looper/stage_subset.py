@@ -17,9 +17,7 @@ from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 import torch
 
 from .awq_processor import AWQProcessor
-from .qqq_processor import QQQProcessor
 from .. import DEBUG_ON, DEVICE_THREAD_POOL
-from ..looper.gptq_processor import GPTQProcessor
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..quantization.config import VramStrategy, GcMode, ExpertsRoutingBypass
@@ -29,7 +27,6 @@ from ..utils.torch import torch_empty_cache, torch_sync
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .module_looper import ModuleLooper
-
 
 @dataclass
 class SubsetForwardContext:
@@ -257,7 +254,7 @@ def _run_single_subset_pass(
         torch_empty_cache()
     moe_skip_modules = []
     failsafe_enabled = failsafe is not None
-    if isinstance(processor, GPTQProcessor) or isinstance(processor, QQQProcessor) or isinstance(processor, AWQProcessor):
+    if isinstance(processor, AWQProcessor):
         for name in subset:
             # Skip MoE experts that never fired; they likely lacked calibration
             # traffic and would produce invalid statistics.

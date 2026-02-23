@@ -1,4 +1,5 @@
 import torch
+import pytest
 from parameterized import parameterized
 
 from gptqmodel.looper.awq_processor import AWQProcessor
@@ -64,7 +65,7 @@ def _legacy_clip(processor: AWQProcessor, w: torch.Tensor, input_feat: torch.Ten
 ])
 def test_awq_clip_consistency(device_name: str, device_str: str):
     if device_name == "cuda" and not torch.cuda.is_available():
-        raise AssertionError("CUDA is not available for clip consistency test")
+        pytest.skip("CUDA is not available for clip consistency test")
 
     dtype = torch.float32 if device_name == "cpu" else torch.float16
     processor = _ClipTestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))

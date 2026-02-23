@@ -9,7 +9,6 @@ from typing import Optional, Tuple
 import torch
 from torch import nn
 
-from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization import FORMAT, METHOD
@@ -100,7 +99,6 @@ class AwqGEMMQuantLinear(AWQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.ALL]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPPORTS_ADAPTERS = [Lora]
 
     SUPPORTS_DTYPES = [torch.float16]
 
@@ -126,7 +124,6 @@ class AwqGEMMQuantLinear(AWQuantLinear):
         out_features: int,
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
-        adapter: Adapter = None,
         register_buffers: bool = False,
         **kwargs,
     ):
@@ -141,7 +138,6 @@ class AwqGEMMQuantLinear(AWQuantLinear):
             bias=bias,
             pack_dtype=pack_dtype,
             backend=kwargs.pop("backend", BACKEND.GEMM),
-            adapter=adapter,
             register_buffers=register_buffers,
             **kwargs)
 
@@ -175,9 +171,6 @@ class AwqGEMMQuantLinear(AWQuantLinear):
 
         if input_dtype != torch.float16:
             out = out.to(dtype=input_dtype)
-
-        if self.adapter:
-            out = self.adapter.apply(x=x, out=out)
 
         return out.reshape(out_shape)
 

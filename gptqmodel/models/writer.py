@@ -17,18 +17,14 @@ import pcre as re
 import torch
 import transformers
 from safetensors import safe_open
-from safetensors.torch import save_file
 from transformers import AutoConfig, ProcessorMixin
 from transformers.utils.generic import ContextManagers
 
-from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
-from ..adapter.peft import LoraConfig
 from ..quantization.config import (
     FORMAT,
     META_FIELD_ACT_GROUP_AWARE,
     META_FIELD_DAMP_AUTO_INCREMENT,
     META_FIELD_DAMP_PERCENT,
-    META_FIELD_GPTAQ_ENABLED,
     META_FIELD_MSE,
     META_FIELD_QUANTIZER,
     META_FIELD_STATIC_GROUPS,
@@ -36,7 +32,6 @@ from ..quantization.config import (
     META_FIELD_URI,
     META_QUANTIZER_GPTQMODEL,
     META_VALUE_URI,
-    MIN_VERSION_WITH_V2,
 )
 from ..utils.backend import BACKEND
 from ..utils.hf import no_init_weights, sanitize_generation_config_file
@@ -68,8 +63,6 @@ PROCESS_LOG_TIME = "time"
 PROCESS_LOG_FWD_TIME = "fwd_time"
 PROCESS_USED_MEMORY = "(v)ram"
 
-EORA_DEFAULT_FILE = "eora.safetensors"
-
 def ModelWriter(cls):
     def save_pretrained(
             self,
@@ -81,61 +74,12 @@ def ModelWriter(cls):
 
     cls.save_pretrained = save_pretrained
 
-    def _eora_save(self, save_dir: str, model_save_dir: str = None):
-        assert isinstance(self.quantize_config.adapter, Lora)
-
-        assert hasattr(self, 'lora_results')
-
-        # save lora tensors
-        if self.lora_results:  # TODO REFRACTOR
-            weights = {}
-            target_modules = set()
-            # convert the dict into safetensors compatible dict
-            for key, adapter in self.lora_results.items():
-                assert isinstance(adapter, Lora)
-                key = key.lower()
-                simple_module_name = key.split(".")[-1] # mlp.gate_proj => gate_proj
-                target_modules.add(simple_module_name)
-
-                # while key.startswith('model.'):
-                #     key = key.removeprefix('model.') # some HF models use model. or model.model.
-
-                # must normalize key since HF can load weights as `model.` or not based on what AutoModel is used
-                weight_key = f"{HF_ADAPTER_WEIGHT_KEY_PREFIX}{key}"
-
-                weights[f"{weight_key}.lora_A.weight"] = adapter.lora_A
-                weights[f"{weight_key}.lora_B.weight"] = adapter.lora_B
-                log.info(f"Adapter: EoRA weights found -> `{weight_key}.lora_A/Lora_B.weight`, rank = `{adapter.rank}`")
-
-            weight_file_path = f"{save_dir.removesuffix('/')}/{HF_ADAPTER_FILE_NAME}"
-
-            # dynamic rank
-            rank_pattern = {}
-            if self.quantize_config.dynamic:
-                rank_pattern = self.quantize_config.extract_adapter_rank_patterns()
-
-            lora_cfg = LoraConfig(base_model_name_or_path=model_save_dir,
-                                  r=self.quantize_config.adapter.rank,
-                                  lora_alpha=self.quantize_config.adapter.rank,
-                                  target_modules=list(target_modules),
-                                  rank_pattern=rank_pattern)
-            lora_cfg.save_pretrained(save_dir=save_dir)
-
-            log.info(f"Adapter: Saving EoRA weights to -> `{save_dir}`")
-
-            save_file(tensors=weights, filename=weight_file_path, metadata={"format": "pt"})
-
-            del self.lora_results  # TODO REFRACTOR
-
-    cls.eora_save = _eora_save
-
     def save_quantized(
             self,
             save_dir: str,
             safetensors_metadata: Optional[Dict[str, str]] = None,
             max_shard_size: Optional[Union[int, str]] = DEFAULT_MAX_SHARD_SIZE,
             meta_quantizer: Optional[str] = None,
-            eora_path: Optional[str] = None,
     ):
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
@@ -196,18 +140,6 @@ def ModelWriter(cls):
         )
 
         self.quantize_config.meta_set(
-            key=META_FIELD_GPTAQ_ENABLED,
-            value=None if self.quantize_config.gptaq is None else {
-                "alpha": self.quantize_config.gptaq.alpha,
-                "device": (
-                    self.quantize_config.gptaq.device
-                    if isinstance(self.quantize_config.gptaq.device, str)
-                    else str(self.quantize_config.gptaq.device)
-                ),
-            }
-        )
-
-        self.quantize_config.meta_set(
             key=META_FIELD_ACT_GROUP_AWARE,
             value=self.quantize_config.act_group_aware
         )
@@ -218,11 +150,6 @@ def ModelWriter(cls):
 
         if not self.quantized:
             raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
-
-        if quantize_config.format == FORMAT.GPTQ_V2:
-            log.warn(
-                f"Using 'format = {FORMAT.GPTQ_V2}': the serialized model is only supported by GPTQModel version >= {MIN_VERSION_WITH_V2}."
-            )
 
         if self.load_quantized_model:
             self.model = self.get_model_with_quantize(
@@ -398,10 +325,6 @@ def ModelWriter(cls):
                 os.remove(index_save_path)
 
         state_dict.clear()
-
-        # save lora
-        if self.quantize_config.adapter:
-            _eora_save(self, save_dir=eora_path if eora_path else self.quantize_config.adapter.path, model_save_dir=save_dir)
 
         # Handle `dangling` tensor files that HF doesn't support (optional) but very useful
         extra_tensor_files = getattr(self, "out_of_model_tensor_files", None)

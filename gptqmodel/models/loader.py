@@ -28,20 +28,15 @@ from transformers import AutoConfig, AutoTokenizer, PretrainedConfig
 from transformers.utils import is_flash_attn_2_available
 from transformers.utils.generic import ContextManagers
 
-from ..adapter.adapter import Adapter
-from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..quantization import QuantizeConfig
-from ..quantization.config import FORMAT, METHOD, MIN_VERSION_WITH_V2
+from ..quantization.config import FORMAT, METHOD
 from ..utils.backend import BACKEND
 from ..utils.hf import no_init_weights
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
 from ..utils.inspect import safe_kwargs_call
 from ..utils.logger import setup_logger
-from ..utils.machete import _validate_machete_device_support
-from ..utils.marlin import _validate_marlin_device_support
 from ..utils.model import (
     auto_dtype,
-    convert_gptq_v1_to_v2_format,
     find_config_seq_len,
     find_modules,
     get_checkpoints,
@@ -307,7 +302,6 @@ def ModelLoader(cls):
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
             device: Optional[Union[str, int]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
-            adapter: Optional[Adapter] = None,
             dtype: [str | torch.dtype] = "auto",
             trust_remote_code: bool = False,
             **kwargs,
@@ -326,12 +320,6 @@ def ModelLoader(cls):
         if isinstance(backend, str):
             backend = BACKEND(backend)
         device = auto_select_device(device, backend)
-
-        if backend == BACKEND.VLLM:
-            import os
-
-            # to optimize vllm inference, set an environment variable 'VLLM_ATTENTION_BACKEND' to 'FLASHINFER'.
-            os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASHINFER'
 
         """load quantized model from local disk"""
         if cls.require_trust_remote_code and not trust_remote_code:
@@ -394,90 +382,12 @@ def ModelLoader(cls):
             log.info("Loading Quantized Model: Auto fix `dtype` to `torch.float16`")
             dtype = torch.float16
 
-        if backend == BACKEND.EXLLAMA_EORA:
-            # EXLLAMA_EORA only supports torch.float16
-            log.info("Loading Quantized Model: Auto fix `dtype` to `torch.float16`")
-            dtype = torch.float16
-
-        # inject adapter into qcfg
-        if adapter is not None:
-            qcfg.adapter = adapter
-
         qcfg.calculate_bits_per_weight()
 
         tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
 
-        if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
-            if backend == BACKEND.VLLM:
-                if qcfg.format != FORMAT.GPTQ and qcfg.format != FORMAT.GEMM:
-                    raise ValueError(f"{backend} backend only supports FORMAT.GPTQ or FORMAT.GEMM: actual = {qcfg.format}")
-            elif backend == BACKEND.SGLANG:
-                if qcfg.format != FORMAT.GPTQ:
-                    raise ValueError(f"{backend} backend only supports FORMAT.GPTQ: actual = {qcfg.format}")
-
-            if backend == BACKEND.VLLM:
-                from ..utils.vllm import load_model_by_vllm, vllm_generate
-
-                model = load_model_by_vllm(
-                    model=model_local_path,
-                    trust_remote_code=trust_remote_code,
-                    **kwargs,
-                )
-
-                model.config = model.llm_engine.model_config
-                model.device = model.llm_engine.vllm_config.device_config.device
-
-                cls.generate = lambda self, **kwargs: vllm_generate(self.model, **kwargs)
-
-            elif backend == BACKEND.SGLANG:
-                from ..utils.sglang import load_model_by_sglang, sglang_generate
-
-                model, hf_config = load_model_by_sglang(
-                    model=model_local_path,
-                    trust_remote_code=trust_remote_code,
-                    dtype=torch.float16,
-                    **kwargs,
-                )
-                model.config = hf_config
-                cls.generate = lambda self, **kwargs: sglang_generate(self.model, **kwargs)
-            return cls(
-                model,
-                quantized=True,
-                quantize_config=qcfg,
-                tokenizer=tokenizer,
-                qlinear_kernel=None,
-                load_quantized_model=True,
-                trust_remote_code=trust_remote_code,
-                model_local_path=model_local_path,
-            )
-
-        if qcfg.format == FORMAT.MARLIN:
-            # format marlin requires marlin kernel
-            if backend not in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and backend != BACKEND.AUTO:
-                raise TypeError(f"FORMAT.MARLIN requires BACKEND.AUTO or BACKEND.MARLIN: actual = `{backend}`.")
-            backend = BACKEND.MARLIN
-
-        # marlin_compatible = False if backend == BACKEND.IPEX else _validate_marlin_device_support()
-        # check for marlin compat for cuda device only
-        # if backend not in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and device == DEVICE.CUDA:
-        #     unsupported = _validate_marlin_compatibility(qcfg)
-        #     if unsupported is None and marlin_compatible:
-        #         logger.info(
-        #             "Hint: Model is compatible with the Marlin kernel. Marlin is optimized for batched inference on Nvidia GPU: `model = GPTQModel.load(..., backend=BACKEND.MARLIN)`."
-        #         )
-
-        if qcfg.format == FORMAT.BITBLAS:
-            # format bitblas requires bitblas kernel
-            if backend != BACKEND.BITBLAS and backend != BACKEND.AUTO:
-                raise TypeError(f"FORMAT.BITBLAS requires BACKEND.AUTO or BACKEND.BITBLAS: actual = `{backend}`.")
-            backend = BACKEND.BITBLAS
-
-        if backend == BACKEND.BITBLAS:
-            from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
-            if BITBLAS_AVAILABLE is False:
-                raise ValueError(BITBLAS_INSTALL_HINT)
-
         possible_model_basenames = [
+            f"awq_model-{qcfg.bits}bit-{qcfg.group_size}g",
             f"gptq_model-{qcfg.bits}bit-{qcfg.group_size}g",
             "model",
         ]
@@ -775,8 +685,8 @@ def ModelLoader(cls):
         log.info(f"Loader: device_map = {device_map}")
 
         load_checkpoint_in_model = True
-        # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
-        if qcfg.format in [FORMAT.GPTQ, FORMAT.GEMM]:
+        # For AWQ GEMM checkpoints, load the state dict eagerly before dispatch.
+        if qcfg.format == FORMAT.GEMM:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,
@@ -789,68 +699,7 @@ def ModelLoader(cls):
 
             load_checkpoint_in_model = False
 
-            if qcfg.format == FORMAT.GPTQ:
-                # validate sym=False v1 loading needs to be protected for models produced with new v2 format codebase
-                if not qcfg.sym and not qcfg.is_quantized_by_gptaq():
-                    raise ValueError(
-                        f"Format: Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
-                    )
-
-                if preload_qlinear_kernel.REQUIRES_FORMAT_V2:
-                    model = convert_gptq_v1_to_v2_format(
-                        model,
-                        cfg=qcfg,
-                        qlinear_kernel=preload_qlinear_kernel,
-                    )
-
-                    qcfg.runtime_format = FORMAT.GPTQ_V2
-
-        if backend == BACKEND.MACHETE:
-            if is_sharded:
-                raise ValueError(
-                    "Format: The loading of sharded checkpoints with Machete is currently not supported."
-                )
-            if not _validate_machete_device_support():
-                raise ValueError(
-                    f"Kernel: Machete kernel requires compute capability >= 9.0. Detected capability: {torch.cuda.get_device_capability()}"
-                )
-
-        if backend in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and (
-                preload_qlinear_kernel == ExllamaV2QuantLinear or qcfg.format == FORMAT.MARLIN):
-            if is_sharded:
-                raise ValueError(
-                    "Format: The loading of sharded checkpoints with Marlin is currently not supported."
-                )
-            if not _validate_marlin_device_support():
-                raise ValueError(
-                    f'Kernel: Marlin kernel does not support this gpu with compute capability of `{torch.cuda.get_device_capability()}`. Please do not use `back=BACKEND.MARLIN`.'
-                )
-
-            # Validate the model can run in Marlin.
-            if dtype != torch.float16:
-                raise ValueError("Marlin kernel requires dtype=torch.float16.")
-
-
-        if backend == BACKEND.BITBLAS:
-            from ..utils.bitblas import prepare_model_for_bitblas_load
-
-            # Prepare model for bitblas load.
-            # If is bitblas serialized load then load directly. Otherwise, convert to bitblas.
-            model = prepare_model_for_bitblas_load(
-                model=model,
-                qcfg=qcfg,
-                quant_linear_class=preload_qlinear_kernel,
-                dtype=dtype,
-                model_save_name=model_save_name,
-                device_map=device_map,
-                desc_act=qcfg.desc_act,
-                sym=qcfg.sym,
-                load_checkpoint_in_model=load_checkpoint_in_model,
-            )
-
-        # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
-        # and we no longer need to call load_checkpoint_in_model()
-        if load_checkpoint_in_model and backend not in [BACKEND.MACHETE, BACKEND.MARLIN, BACKEND.MARLIN_FP16, BACKEND.BITBLAS]:
+        if load_checkpoint_in_model:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,
@@ -891,31 +740,6 @@ def ModelLoader(cls):
         model = gptqmodel_post_init(model, use_act_order=qcfg.desc_act, quantize_config=qcfg)
 
         model.eval()
-
-        if backend == BACKEND.MLX:
-            import tempfile
-            try:
-                from mlx_lm import load
-                from mlx_lm.utils import save_config, save_model
-
-                from ..utils.mlx import convert_gptq_to_mlx_weights, mlx_generate
-            except ModuleNotFoundError as exception:
-                raise type(exception)(
-                    "GPTQModel load mlx model required dependencies are not installed.",
-                    "Please install via `pip install gptqmodel[mlx] --no-build-isolation`.",
-                )
-
-            with tempfile.TemporaryDirectory() as temp_dir:
-                mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, model, qcfg.to_dict(), cls.lm_head)
-
-                save_model(temp_dir, mlx_weights, donate_model=True)
-                save_config(mlx_config, config_path=temp_dir + "/config.json")
-                tokenizer.save_pretrained(temp_dir)
-
-                model, _ = load(temp_dir)
-
-                cls.generate = lambda _, **kwargs: mlx_generate(model=model, tokenizer=tokenizer, **kwargs)
-
 
         return cls(
             model,

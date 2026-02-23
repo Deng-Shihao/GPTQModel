@@ -12,9 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pcre as re
 import torch
-from packaging import version
 
-from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.logger import setup_logger
 from ..utils.random_str import get_random_string
 
@@ -26,7 +24,6 @@ GROUP_SIZE_FIELD_CODE = "group_size"
 FORMAT_FIELD_CODE = "format"
 SYMMETRIC_FIELD_CODE = "sym"
 FORMAT_FIELD_CHECKPOINT = "checkpoint_format"
-FORMAT_FIELD_COMPAT_MARLIN = "is_marlin_format"
 QUANT_METHOD_FIELD = "quant_method"
 PACK_DTYPE_FIELD = "pack_dtype"
 QUANT_CONFIG_FILENAME = "quantize_config.json"
@@ -34,8 +31,6 @@ QUANT_CONFIG_FILENAME_COMPAT = [QUANT_CONFIG_FILENAME, "quant_config.json", "con
 # This is AwqBackendPackingMethod, not GPTQModel.BACKEND.
 # It's used to distinguish between quantization by llm-awq and autoawq; llm-awq actually uses GEMV_FAST for packing.
 AWQ_PACKING_BACKEND_FIELD = "backend"
-
-MIN_VERSION_WITH_V2 = "0.9.0"
 
 META_FIELD = "meta"
 # quantizer is the tool that did the quantization
@@ -55,19 +50,8 @@ META_FIELD_TRUE_SEQUENTIAL = "true_sequential"
 META_FIELD_MSE = "mse"
 META_FIELD_ACT_GROUP_AWARE = "act_group_aware"
 
-META_FIELD_GPTAQ_ENABLED = "gptaq"
-
-ADAPTER_FIELD = "adapter"
-
 # saved formats
 class FORMAT(str, Enum):
-    GPTQ = "gptq"
-    # v2 format fixed sym = False quantization
-    GPTQ_V2 = "gptq_v2"
-    MARLIN = "marlin"
-    BITBLAS = "bitblas"
-    QQQ = "qqq"
-
     GEMM = "gemm"
     GEMV = "gemv"
     GEMV_FAST = "gemv_fast"
@@ -76,9 +60,15 @@ class FORMAT(str, Enum):
 
 # quant methods
 class METHOD(str, Enum):
-    GPTQ = "gptq"
-    QQQ = "qqq"
     AWQ = "awq"
+
+AWQ_ONLY_FORMATS = {
+    FORMAT.GEMM,
+    FORMAT.GEMV,
+    FORMAT.GEMV_FAST,
+    FORMAT.LLM_AWQ,
+}
+AWQ_ONLY_ERROR = "This project is AWQ-only. Please set `quant_method=METHOD.AWQ`."
 
 
 class VramStrategy(str, Enum):
@@ -290,56 +280,6 @@ class FailSafe:
 
 
 @dataclass
-class HessianConfig:
-    # Hessian accumulation controls (GPTQ only)
-    chunk_size: Optional[int] = field(default=None, metadata={"help": "Maximum rows per Hessian chunk"})
-    chunk_bytes: Optional[int] = field(default=None, metadata={"help": "Memory budget (in bytes) for Hessian chunk staging"})
-    staging_dtype: Union[str, torch.dtype] = field(
-        default=torch.float32,
-        metadata={"help": "Stage Hessian chunks in a lower precision dtype when supported"},
-    )
-
-    def __post_init__(self):
-        if self.chunk_size is not None:
-            if not isinstance(self.chunk_size, int):
-                raise ValueError("HessianConfig: `chunk_size` must be an integer or None.")
-            if self.chunk_size <= 0:
-                raise ValueError("HessianConfig: `chunk_size` must be a positive integer.")
-
-        if self.chunk_bytes is not None:
-            if not isinstance(self.chunk_bytes, int):
-                raise ValueError("HessianConfig: `chunk_bytes` must be an integer or None.")
-            if self.chunk_bytes <= 0:
-                raise ValueError("HessianConfig: `chunk_bytes` must be a positive integer amount of bytes.")
-
-        if isinstance(self.staging_dtype, str):
-            self.staging_dtype = self.staging_dtype.lower()
-            if self.staging_dtype not in ["float32", "float16", "bfloat16"]:
-                raise ValueError("HessianConfig: `staging_dtype` must be float32, float16, or bfloat16.")
-            self.staging_dtype = getattr(torch, self.staging_dtype)
-        elif isinstance(self.staging_dtype, torch.dtype):
-            if self.staging_dtype not in [torch.float32, torch.float16, torch.bfloat16]:
-                raise ValueError("HessianConfig: `staging_dtype` must be float32, float16, or bfloat16.")
-        else:
-            raise ValueError("HessianConfig: `staging_dtype` must be a torch.dtype or string.")
-
-
-@dataclass
-class GPTAQConfig:
-    alpha: float = field(default=0.25)
-    device: Union[str, torch.device] = field(default="auto")
-
-    def __post_init__(self):
-        if not isinstance(self.alpha, (int, float)):
-            raise ValueError("GPTAQConfig: `alpha` must be a numeric value.")
-        if isinstance(self.device, str):
-            if not self.device:
-                raise ValueError("GPTAQConfig: `device` must be a non-empty string or torch.device.")
-        elif not isinstance(self.device, torch.device):
-            raise ValueError("GPTAQConfig: `device` must be a string or torch.device.")
-
-
-@dataclass
 class BaseMoERouting:
     pass
 
@@ -450,25 +390,6 @@ class MoEConfig:
             }
         }
 
-
-QUANT_METHOD_FORMAT_MAPPING = {
-    METHOD.GPTQ: {
-        FORMAT.GPTQ,
-        FORMAT.GPTQ_V2,
-        FORMAT.MARLIN,
-        FORMAT.BITBLAS,
-    },
-    METHOD.QQQ: {
-        FORMAT.QQQ,
-    },
-    METHOD.AWQ: {
-        FORMAT.GEMM,
-        FORMAT.GEMV,
-        FORMAT.GEMV_FAST,
-        FORMAT.MARLIN,
-        FORMAT.LLM_AWQ,
-    },
-}
 
 # inference only methods should go here
 QUANTIZE_BLACK_LIST = {}
@@ -589,7 +510,6 @@ def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: st
             if key is None:
                 return overrides
             else:
-                # subkey example: Lora override format: `{ "adapter": { "rank": 512 } }`
                 if sub_key:
                     sub_value = overrides.get(key, None)
                     if sub_value is None and key in DYNAMIC_FIELD_SYNONYMS:
@@ -618,9 +538,7 @@ class QuantizeConfig():
     # allow dynamic bitsize per layer, if None or some layer not set, use bits
     dynamic: Optional[Dict[str, Dict[str, Union[int, bool]]]] = field(default=None)
 
-    # GPTQ only
-    # 128 offer good balance between inference speed, vram usage (bpw), and quality
-    # use 32 for highest quality with slower inference and higher vram usage
+    # 128 offers a good balance between inference speed, memory usage (bpw), and quality.
     group_size: int = field(default=128)
 
     # increase damp if NaN is encountered during `.quantize()` and/or increase calib dataset size
@@ -629,7 +547,6 @@ class QuantizeConfig():
 
     desc_act: Optional[bool] = field(default=None)
 
-    # GPTQ only
     act_group_aware: Optional[bool] = field(default=None)
     static_groups: bool = field(default=False)
 
@@ -640,19 +557,17 @@ class QuantizeConfig():
 
     lm_head: bool = field(default=False)
 
-    quant_method: METHOD = field(default=METHOD.GPTQ)
+    quant_method: METHOD = field(default=METHOD.AWQ)
 
-    # default to gptq v1 format for maximum compat with 3rd party inference libs with minimal loss vs v2
-    # if you inference with gptqmodel, save to gptq_v2 format for best result
-    format: FORMAT = field(default=FORMAT.GPTQ)
+    # AWQ-only build: default to the most compatible AWQ checkpoint format.
+    format: FORMAT = field(default=FORMAT.GEMM)
 
     # quantization_order: str = "activate",
     # quantization_scale: str = "mse", # or absmax
     # is_distributed: bool = False,
     # tied_gptq_handle: Optional["GPTQ"] = None
 
-    # GPTQ only
-    # mean square error calculation: may reduce error loss for some models
+    # mean square error exponent used by quantizer internals.
     mse: float = field(default=0.0)
 
     # properties that do not directly contributes to quantization or quant inference should be placed in meta
@@ -662,16 +577,12 @@ class QuantizeConfig():
     # normalized to DEVICE after passing to load()
     device: Optional[Union[str, torch.device]] = field(default=None)
 
-    # gptq was originally designed to pack quantized weights inside INT32 dtypes
-    # allowing using different dtypes used for packing quantized weights
+    # Packed AWQ tensors (qweight, qzeros) storage dtype.
     # affects [`qweights`, `qzeros`]
     pack_dtype: Optional[Union[str, torch.dtype]] = field(default=torch.int32)
 
     # packing implementation hinpt (`original` = legacy CPU pack, `gpu` enables CUDA pack, `cpu` forces block CPU pack).
     pack_impl: str = field(default="cpu")
-
-    # pending used field
-    adapter: Optional[Union[Dict[str, Any], Lora]] = field(default=None)
 
     # quantization only:
     # controls cpu memory saving by offloading layers/modules to disk in the slow quantization process
@@ -679,27 +590,11 @@ class QuantizeConfig():
     offload_to_disk: bool = field(default=True, metadata={"help": "Offload completed module memory to disk during quantization loop"})
     offload_to_disk_path: str = field(default=None, metadata={"help": "Offload disk path. Only applicable if Offload to disk is enabled"})
 
-    rotation: Optional[str] = field(default=None, metadata={"choices": ["hadamard", "random"]})
-
-    # GPTQ only
-    # deprecated: only used for compat
-    is_marlin_format: bool = False
-
-    # gptq only:
-    # if calibration is insufficient, fallback to a simple quantization strategy; encapsulated in FailSafe config
+    # If calibration is insufficient, fallback to a simple quantization strategy.
     failsafe: Optional[FailSafe] = field(default_factory=FailSafe)
 
-    # GPTQ only
-    # gptaq only:
-    gptaq: Optional[GPTAQConfig] = field(default=None)
-
-    # gptq only:
-    # skip all heavy computations for testing model loading
+    # Skip heavy computations for fast model loading validation.
     mock_quantization: bool = field(default=False, metadata={"help": "Skip heavy computations for fast model loading validation"})
-
-    # GPTQ only
-    # Hessian accumulation controls (GPTQ only)
-    hessian: Optional[HessianConfig] = field(default_factory=HessianConfig)
 
     # Callback function to filter devices for compute-intensive stages (quantization and forwarding)
     # Takes a list of devices and returns either the original list or a filtered subset
@@ -762,25 +657,34 @@ class QuantizeConfig():
             else:
                 raise ValueError(f"QuantizeConfig: Unsupported `pack_dtype`: {self.pack_dtype}")
 
-        # validate quant method and format is matched
-        valid_formats = QUANT_METHOD_FORMAT_MAPPING.get(self.quant_method, None)
-        if valid_formats is None:
+        if isinstance(self.quant_method, str):
+            if self.quant_method.lower() != METHOD.AWQ.value:
+                raise ValueError(AWQ_ONLY_ERROR)
+            self.quant_method = METHOD.AWQ
+        elif isinstance(self.quant_method, METHOD):
+            if self.quant_method != METHOD.AWQ:
+                raise ValueError(AWQ_ONLY_ERROR)
+        else:
             raise ValueError(f"QuantizeConfig: Unsupported `quant_method`: {self.quant_method}")
 
-        # If the user does not pass it, the default value will be set according to quant_method
-        if self.damp_percent is None:
-            if self.quant_method == METHOD.QQQ:
-                self.damp_percent = 0.005
-            else:
-                self.damp_percent = 0.05
-        if self.damp_auto_increment is None:
-            if self.quant_method == METHOD.QQQ:
-                self.damp_auto_increment = 0.001
-            else:
-                self.damp_auto_increment = 0.01
+        if isinstance(self.format, str):
+            try:
+                self.format = FORMAT(self.format.lower())
+            except ValueError:
+                log.info(f"QuantizeConfig: Auto fix unsupported `format` to `{FORMAT.GEMM}`")
+                self.format = FORMAT.GEMM
+        elif not isinstance(self.format, FORMAT):
+            raise ValueError(f"QuantizeConfig: Unsupported `format`: {self.format}")
 
-        # TODO FIXME awq compat which didn't have checkpoint_format before merging to gptqmodel
-        if self.quant_method == METHOD.AWQ and self.format not in [FORMAT.MARLIN, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.GEMM, FORMAT.LLM_AWQ]:
+        valid_formats = AWQ_ONLY_FORMATS
+
+        # If the user does not pass it, use stable AWQ defaults.
+        if self.damp_percent is None:
+            self.damp_percent = 0.05
+        if self.damp_auto_increment is None:
+            self.damp_auto_increment = 0.01
+
+        if self.format not in AWQ_ONLY_FORMATS:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.GEMM}`")
             self.format = FORMAT.GEMM
 
@@ -874,35 +778,19 @@ class QuantizeConfig():
         if self.damp_auto_increment < 0:
             raise ValueError("QuantizeConfig:: `damp_auto_increment` must greater than 0.")
 
-        if self.hessian is None:
-            self.hessian = HessianConfig()
-        elif isinstance(self.hessian, dict):
-            self.hessian = HessianConfig(**self.hessian)
-        elif not isinstance(self.hessian, HessianConfig):
-            raise ValueError("QuantizeConfig: `hessian` must be a HessianConfig, dict, or None.")
-
-        if self.gptaq is None:
-            pass
-        elif isinstance(self.gptaq, dict):
-            self.gptaq = GPTAQConfig(**self.gptaq)
-        elif not isinstance(self.gptaq, GPTAQConfig):
-            raise ValueError("QuantizeConfig: `gptaq` must be a GPTAQConfig, dict, or None.")
-
         # resolve activation ordering compatibility and defaults
         desc_act_user_value = self.desc_act
         act_group_aware_user_value = self.act_group_aware
 
         if desc_act_user_value is None:
-            # GPTQ defaults to higher quality ordering disabled, others retain legacy default
-            self.desc_act = False if self.quant_method == METHOD.GPTQ else True
+            self.desc_act = True
         elif isinstance(desc_act_user_value, bool):
             self.desc_act = desc_act_user_value
         else:
             self.desc_act = bool(desc_act_user_value)
 
         if act_group_aware_user_value is None:
-            # auto-enable for GPTQ unless user explicitly disables it
-            self.act_group_aware = self.quant_method == METHOD.GPTQ
+            self.act_group_aware = False
         elif isinstance(act_group_aware_user_value, bool):
             self.act_group_aware = act_group_aware_user_value
         else:
@@ -923,11 +811,6 @@ class QuantizeConfig():
                     raise ValueError("QuantizeConfig: `meta` keys must be strings")
         else:
             self.meta = {}
-
-        # adapter normalize
-        self.adapter = normalize_adapter(self.adapter)
-
-        #print(f"adapter: {self.adapter}")
 
         if self.offload_to_disk and not self.offload_to_disk_path:
             path_key = f"{get_random_string()}-{get_random_string()}"
@@ -958,12 +841,6 @@ class QuantizeConfig():
                 f"QuantizeConfig: `gc_mode` must be one of {[v.value for v in GcMode]}."
             )
 
-    def extension_set(self, key: str, value: Any):
-        if self.adapter is None:
-            self.adapter = {}
-
-        self.adapter[key.lower()] = value
-
     def _resolve_activation_ordering(
         self,
         desc_act_user_value: Optional[bool],
@@ -987,9 +864,6 @@ class QuantizeConfig():
                 "Set `act_group_aware=False` explicitly to silence this warning."
             )
             self.act_group_aware = False
-
-    def extension_get(self, key: str) -> Any:
-            return self.adapter.get(key.lower()) if self.adapter else None
 
     def meta_set(self, key: str, value: Any):
         self.meta[key] = value
@@ -1019,35 +893,6 @@ class QuantizeConfig():
                 result.append((parts[0].lower(), parts[1].lower()))
         return result
 
-    # is quantized model quantized or packed by gptqmodel version with gptaq format code
-    def is_quantized_by_gptaq(self) -> bool:
-        # check meta.quantizer
-        result = self.meta_get_versionable(META_FIELD_QUANTIZER)
-        if len(result) > 0:
-            for producer, _version in result:
-                if producer == META_QUANTIZER_GPTQMODEL:
-                    return version.parse(_version) >= version.parse(MIN_VERSION_WITH_V2)
-
-        return False
-
-    def extract_adapter_rank_patterns(self) -> Optional[Dict[str, int]]:
-        adapter_rank_patterns = {}
-
-        # no rank can be had if there is no dynamic or adapter
-        if not self.dynamic or not self.adapter:
-            return adapter_rank_patterns
-
-        # override format: `{ "adapter": { "rank": 512 } }`
-        for k, v in self.dynamic.items():
-            adapter_override = v.get("adapter", None) # TODO use const, not str
-            if adapter_override and isinstance(adapter_override, Dict):
-                rank = adapter_override.get("rank", None)
-                if rank and isinstance(rank, int):
-                    # need to strip `+:` positive prefix
-                    adapter_rank_patterns[k.lstrip("+:")] = rank  # TODO use const, not str
-
-        return adapter_rank_patterns
-
     def save_pretrained(self, save_dir: str, **kwargs):
         with open(join(save_dir, QUANT_CONFIG_FILENAME), "w", encoding="utf-8") as f:
             d = self.to_dict()
@@ -1058,10 +903,11 @@ class QuantizeConfig():
     @classmethod
     # normalize quant config for compat and also performs validation
     def from_quant_config(cls, quantize_cfg, format: str = None):
-        valid_formats = {FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.MARLIN, FORMAT.BITBLAS}
+        valid_formats = AWQ_ONLY_FORMATS
         format_auto_inferred = False
         # compat: format can be passed in via from_quantized() if field missing from json
         if format:
+            format = FORMAT(format.lower()) if isinstance(format, str) else format
             if format not in valid_formats:
                 raise ValueError(f"QuantizeConfig: Unknown quantization checkpoint format: {format}.")
             if quantize_cfg.get(FORMAT_FIELD_CHECKPOINT):
@@ -1072,11 +918,10 @@ class QuantizeConfig():
 
         field_names = [field.name for field in fields(cls)]
 
-        # FIXME convert awg quantize_config to gptq quantize_config
+        # AWQ-only defaults for missing fields.
         normalized = {
-            QUANT_METHOD_FIELD: METHOD.GPTQ,
-            # compat: default to gptq(v1) when loading models
-            FORMAT_FIELD_CODE: format if format else FORMAT.GPTQ,
+            QUANT_METHOD_FIELD: METHOD.AWQ,
+            FORMAT_FIELD_CODE: format if format else FORMAT.GEMM,
         }
 
         for key, val in quantize_cfg.items():
@@ -1091,22 +936,15 @@ class QuantizeConfig():
 
             if key == FORMAT_FIELD_CHECKPOINT:
                 val = val.lower()
-
-                if val in {FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.MARLIN, FORMAT.BITBLAS}:
+                if val in valid_formats:
                     normalized[key] = val
                 else:
                     raise ValueError(f"QuantizeConfig: Unknown quantization format: `{val}`.")
             elif key == QUANT_METHOD_FIELD:
                 val = val.lower()
-                # compat: some hf models use quant_method=marlin or bitblas
-                if val == FORMAT.MARLIN:
-                    normalized[FORMAT_FIELD_CODE] = FORMAT.MARLIN
-                elif val == FORMAT.BITBLAS:
-                    normalized[FORMAT_FIELD_CODE] = FORMAT.BITBLAS
-                elif val not in {METHOD.GPTQ, METHOD.QQQ, METHOD.AWQ}:
-                    raise ValueError(f"QuantizeConfig: Unknown quantization method: `{val}`.")
-                else:
-                    normalized[QUANT_METHOD_FIELD] = val
+                if val != METHOD.AWQ.value:
+                    raise ValueError(AWQ_ONLY_ERROR)
+                normalized[QUANT_METHOD_FIELD] = METHOD.AWQ
             elif key == FORMAT_FIELD_CODE:
                 normalized[key] = val.lower() if isinstance(val, str) else val
             elif key == "failsafe":
@@ -1116,40 +954,23 @@ class QuantizeConfig():
             else:
                 log.info(f"QuantizeConfig: Ignoring unknown parameter in the quantization configuration: {key}.")
 
-        # fix method if format is not allowed for the method
+        if normalized.get(QUANT_METHOD_FIELD) != METHOD.AWQ:
+            raise ValueError(AWQ_ONLY_ERROR)
+
         fmt = normalized.get(FORMAT_FIELD_CODE)
-        method = normalized.get(QUANT_METHOD_FIELD)
-
-        # TODO FIXME qqq compat which didn't have checkpoint_format before merging to gptqmodel
-        if method == METHOD.QQQ and fmt != FORMAT.QQQ:
-            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.QQQ}`")
-            normalized[FORMAT_FIELD_CODE] = FORMAT.QQQ
-            fmt = FORMAT.QQQ
-
-        if fmt is not None:
-            allowed_methods = [m for m, fmts in QUANT_METHOD_FORMAT_MAPPING.items() if fmt in fmts]
-            if method not in allowed_methods:
-                if fmt in {FORMAT.GEMM, FORMAT.GEMV, FORMAT.GEMV_FAST}:
-                    new_method = METHOD.AWQ
-                elif fmt in {FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.BITBLAS}:
-                    new_method = METHOD.GPTQ
-                elif fmt == FORMAT.QQQ:
-                    new_method = METHOD.QQQ
-                elif fmt == FORMAT.MARLIN:
-                    new_method = method if method in {METHOD.GPTQ, METHOD.AWQ} else METHOD.GPTQ
-                else:
-                    new_method = allowed_methods[0] if allowed_methods else METHOD.GPTQ
-                if new_method != method:
-                    log.warn(
-                        f"QuantizeConfig: `{FORMAT_FIELD_CODE}`=`{fmt}` is incompatible with `{QUANT_METHOD_FIELD}`=`{method}`. Auto-fix method to `{new_method}`.")
-                    normalized[QUANT_METHOD_FIELD] = new_method
+        if isinstance(fmt, str):
+            fmt = FORMAT(fmt.lower())
+        if fmt not in AWQ_ONLY_FORMATS:
+            log.warn(
+                "QuantizeConfig: unsupported AWQ format `%s`, auto-fixing to `%s`.",
+                fmt,
+                FORMAT.GEMM,
+            )
+            fmt = FORMAT.GEMM
+        normalized[FORMAT_FIELD_CODE] = fmt
 
         if format_auto_inferred:
             log.info(f"QuantizeConfig: `{FORMAT_FIELD_CHECKPOINT}` is missing from the quantization configuration and is automatically inferred to {normalized[FORMAT_FIELD_CODE]}")
-
-        if normalized[FORMAT_FIELD_CODE] in {FORMAT.BITBLAS}:
-            # AWQ and Marlin do not reorder the rows.
-            normalized["desc_act"] = False
 
         if "sym" not in normalized:
             log.warn(
@@ -1159,10 +980,6 @@ class QuantizeConfig():
         meta_payload = normalized.get(META_FIELD)
         if "failsafe" not in normalized and isinstance(meta_payload, dict) and "failsafe" in meta_payload:
             normalized["failsafe"] = meta_payload.get("failsafe")
-        if "hessian" not in normalized and isinstance(meta_payload, dict) and "hessian" in meta_payload:
-            normalized["hessian"] = meta_payload.get("hessian")
-        if "gptaq" not in normalized and isinstance(meta_payload, dict) and "gptaq" in meta_payload:
-            normalized["gptaq"] = meta_payload.get("gptaq")
         if "gc_mode" not in normalized and isinstance(meta_payload, dict) and "gc_mode" in meta_payload:
             normalized["gc_mode"] = meta_payload.get("gc_mode")
         if (
@@ -1178,6 +995,9 @@ class QuantizeConfig():
         ):
             normalized["auto_forward_data_parallel"] = meta_payload.get("auto_forward_data_parallel")
 
+        # AWQ-only mode ignores legacy non-AWQ metadata when loading old configs.
+        normalized.pop("rotation", None)
+        normalized.pop("gptaq", None)
         cfg = cls(**normalized)
 
         if quantize_cfg.get(AWQ_PACKING_BACKEND_FIELD) and quantize_cfg[AWQ_PACKING_BACKEND_FIELD] == "llm-awq":
@@ -1255,15 +1075,6 @@ class QuantizeConfig():
                 "smooth": smooth,
             }
 
-        if self.gptaq is None:
-            meta_payload["gptaq"] = None
-        else:
-            device = self.gptaq.device
-            device_value = device if isinstance(device, str) else str(device)
-            meta_payload["gptaq"] = {
-                "alpha": self.gptaq.alpha,
-                "device": device_value,
-            }
         meta_payload["offload_to_disk"] = self.offload_to_disk
         meta_payload["offload_to_disk_path"] = self.offload_to_disk_path
         meta_payload["pack_impl"] = self.pack_impl
@@ -1273,11 +1084,6 @@ class QuantizeConfig():
         meta_payload["gc_mode"] = self.gc_mode
         meta_payload["wait_for_submodule_finalizers"] = self.wait_for_submodule_finalizers
         meta_payload["auto_forward_data_parallel"] = self.auto_forward_data_parallel
-        meta_payload["hessian"] = {
-            "chunk_size": self.hessian.chunk_size,
-            "chunk_bytes": self.hessian.chunk_bytes,
-            "staging_dtype": str(self.hessian.staging_dtype).split(".")[-1],
-        }
         meta_payload["vram_strategy"] = (
             self.vram_strategy.value if isinstance(self.vram_strategy, VramStrategy) else self.vram_strategy
         )
@@ -1293,8 +1099,6 @@ class QuantizeConfig():
             # torch.dtype convert to string
             PACK_DTYPE_FIELD: str(self.pack_dtype).split(".")[-1],
             META_FIELD: meta_payload,
-            # DO NOT EXPORT Adapter to config/json since adapter can be swapped out/in
-            # ADAPTER_FIELD: self.adapter.to_dict() if self.adapter else None,
             # DO NOT EXPORT compute_device_filter since functions are not serializable
         }
 
@@ -1303,16 +1107,6 @@ class QuantizeConfig():
             # awq compat with vllm/sglang/transformers loaders
             out["version"] = self.format
             out[FORMAT_FIELD_CODE] = self.format
-        else:
-            out["sym"] = self.sym
-        if self.quant_method == METHOD.GPTQ:
-            out[FORMAT_FIELD_CODE] = self.format
-
-        dynamic = out["dynamic"]
-        if dynamic:
-            # dynamic adapter config is only used in the quantize phase and is deleted when saving.
-            for _, v in dynamic.items():
-                v.pop("adapter", None)
 
         # simplify: clean keys where the value is None or empty [list, dict]
         out = {k: v for k, v in out.items() if v is not None and (v not in [None, {}])}

@@ -33,31 +33,23 @@ from transformers import PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
-from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
-from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
-
-from ..adapter.adapter import Adapter
 from ..looper.named_module import NamedModule
 from ..models._const import (
     CPU,
     DEVICE,
-    EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
     EXPERT_INDEX_PLACEHOLDER,
     SUPPORTS_MODULE_TYPES,
 )
 from ..nn_modules.qlinear import BaseQuantLinear
-from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
-from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.exllamav2_awq import AwqExllamaV2QuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from ..quantization.config import FORMAT_FIELD_CHECKPOINT, METHOD, dynamic_get
+from ..quantization.config import METHOD, dynamic_get
 from . import has_gil_disabled
 from .backend import BACKEND
 from .ctx import ctx
 from .device import get_device
 from .importer import select_quant_linear
 from .logger import log_time_block, setup_logger
-from .torch import HAS_CUDA, torch_empty_cache
+from .torch import torch_empty_cache
 
 
 log = setup_logger()
@@ -256,16 +248,11 @@ def make_quant(
 
     bits = qcfg.bits
     group_size =qcfg.group_size
-    extension = qcfg.adapter
     format = qcfg.format
     desc_act = qcfg.desc_act
     sym = qcfg.sym
     dynamic = qcfg.dynamic
     pack_dtype = qcfg.pack_dtype
-
-    # Bitblas needs to be loaded as gptq's quant linear first, and then converted to bitblas format.
-    if not pack and format in (FORMAT.GPTQ, FORMAT.GPTQ_V2) and backend == BACKEND.BITBLAS:
-        backend = BACKEND.TORCH
 
     # returns multiple validated kernels
     quant_linear_candidates = select_quant_linear(
@@ -281,7 +268,6 @@ def make_quant(
         device=device,
         pack_dtype=pack_dtype,
         multi_select=True,
-        adapter=extension,
     )
 
     log.info(f"Kernel: candidates -> `[{', '.join(cls.__name__ for cls in quant_linear_candidates)}]`")
@@ -307,7 +293,6 @@ def make_quant(
                 lm_head_name=lm_head_name,
                 pack_dtype=pack_dtype,
                 backend=backend,
-                adapter=qcfg.adapter,
             )
             log.info(f"Kernel: selected -> `{linear_cls.__name__}`.")
             return linear_cls
@@ -335,8 +320,6 @@ def create_quant_module(
     pack_dtype: torch.dtype,
     backend: BACKEND = BACKEND.AUTO,
     register_buffers: bool = True,
-    adapter: Optional[Adapter] = None,
-
 ):
     # unwrap named module
     if isinstance(submodule, NamedModule):
@@ -412,7 +395,6 @@ def create_quant_module(
         in_features=in_features,
         out_features=out_features,
         device=device,
-        adapter=adapter, # TODO FIX ME..need to pass Eora if loaded
     )
     if err is not None:
         raise err
@@ -431,7 +413,6 @@ def create_quant_module(
         lm_head_name=lm_head_name,
         backend=backend,
         register_buffers=register_buffers,
-        adapter=adapter,
     )
     new_layer.device = ori_layer_device
     recurse_setattr(module, name, new_layer.to(ori_layer_device))
@@ -449,8 +430,6 @@ def create_quant_layer(
         lm_head_name: str,
         pack_dtype: torch.dtype,
         backend: BACKEND,
-        adapter: Optional[Adapter] = None,
-
 ) -> Type[BaseQuantLinear]:
     if isinstance(module, linear_cls):
         return linear_cls
@@ -473,209 +452,9 @@ def create_quant_layer(
             lm_head_name=lm_head_name,
             pack_dtype=pack_dtype,
             backend=backend,
-            adapter=adapter,
         )
 
     return linear_cls
-
-# public/stable api exposed to transformer/optimum
-def hf_convert_gptq_v1_to_v2_format(
-    model: nn.Module,
-    bits: int,
-    qlinear_kernel: Type[BaseQuantLinear],
-    checkpoint_format: str,
-    meta: Optional[Dict[str, any]],
-) -> Tuple[nn.Module, bool]:
-    if checkpoint_format == "gptq":
-        # skip v1 to v2 conversion for kernels that can only operate on sym=True (gptq_v1)
-        if qlinear_kernel in [MarlinQuantLinear, ExllamaEoraQuantLinear]:
-            return model, False
-
-        cfg = QuantizeConfig(bits=bits)
-        return convert_gptq_v1_to_v2_format(model, cfg, qlinear_kernel), True
-    else:
-        return model, False
-
-def convert_gptq_v1_to_v2_format_module(module: BaseQuantLinear, bits: int, pack_dtype: torch.dtype) -> nn.Module:
-    assert isinstance(module, BaseQuantLinear)
-
-    log.info.once("Format: Converting GPTQ v1 to v2")
-
-    # v1 checkpoint format used to do `qzeros = qzeros -= 1` before serialization, thus the
-    # additions here do not overflow.
-    # v1 checkpoint format with sym=False saved via convert_gptq_v2_to_v1_format() will
-    # overflow ~<=13% based on testing
-    if bits == 2:
-        if pack_dtype == torch.int64:
-            module.qzeros.data += 0b0101010101010101010101010101010101010101010101010101010101010101
-        elif pack_dtype == torch.int32:
-            module.qzeros.data += 0b01010101010101010101010101010101
-        elif pack_dtype == torch.int16:
-            module.qzeros.data += 0b0101010101010101
-        elif pack_dtype == torch.int8:
-            module.qzeros.data += 0b01010101
-    elif bits == 3:
-        # range 0 offset
-        if pack_dtype == torch.int64:
-            offset = 0b0010010010010010010010010010010000100100100100100100100100100100
-        elif pack_dtype == torch.int32:
-            offset = 0b00100100100100100100100100100100
-        elif pack_dtype == torch.int16:
-            offset = 0b0010010010010010
-        elif pack_dtype == torch.int8:
-            offset = 0b00100100
-
-        module.qzeros.data[:, range(0, module.qzeros.data.shape[1], 3)] += (
-            offset
-        )
-
-        # range 1 offset
-        if pack_dtype == torch.int64:
-            offset = 0b1001001001001001001001001001001010010010010010010010010010010010
-        elif pack_dtype == torch.int32:
-            offset = 0b10010010010010010010010010010010
-        elif pack_dtype == torch.int16:
-            offset = 0b1001001001001001
-        elif pack_dtype == torch.int8:
-            offset = 0b10010010
-
-        module.qzeros.data[:, range(1, module.qzeros.data.shape[1], 3)] += (
-            offset
-        )
-
-        # range 2 offset
-        if pack_dtype == torch.int64:
-            offset = 0b0100100100100100100100100100100101001001001001001001001001001001
-        elif pack_dtype == torch.int32:
-            offset = 0b01001001001001001001001001001001
-        elif pack_dtype == torch.int16:
-            offset = 0b0100100100100100
-        elif pack_dtype == torch.int8:
-            offset = 0b01001001
-
-        module.qzeros.data[:, range(2, module.qzeros.data.shape[1], 3)] += (
-            offset
-        )
-    elif bits == 4:
-        if pack_dtype == torch.int64:
-            module.qzeros.data += 0b0001000100010001000100010001000100010001000100010001000100010001
-        elif pack_dtype == torch.int32:
-            module.qzeros.data += 0b00010001000100010001000100010001
-        elif pack_dtype == torch.int16:
-            module.qzeros.data += 0b0001000100010001
-        elif pack_dtype == torch.int8:
-            module.qzeros.data += 0b00010001
-    elif bits == 8:
-        if pack_dtype == torch.int64:
-            module.qzeros.data += 0b0000000100000001000000010000000100000001000000010000000100000001
-        elif pack_dtype == torch.int32:
-            module.qzeros.data += 0b00000001000000010000000100000001
-        elif pack_dtype == torch.int16:
-            module.qzeros.data += 0b0000000100000001
-        elif pack_dtype == torch.int8:
-            module.qzeros.data += 0b00000001
-    else:
-        raise NotImplementedError("Only 2,3,4,8 bits are supported.")
-
-    # change format id
-    module.qzero_format(format=2)
-
-# Optionally convert weight from gptq_v1 to v2 format if Kernel is compatible with v2
-@torch.inference_mode()
-def convert_gptq_v1_to_v2_format(
-    model,
-    cfg: QuantizeConfig,
-    qlinear_kernel: Type[BaseQuantLinear],
-):
-    # skip v2 to v1 conversion for gptq_v1 kernels
-    if cfg.quant_method in [METHOD.GPTQ] and not qlinear_kernel.REQUIRES_FORMAT_V2:
-        log.info(
-            f"Format: Skipped v1 to v2 conversion due to Kernel  `{qlinear_kernel}`.")
-        return model
-
-    # Limit thread usage to avoid auto-parallizataion regression
-    # with tctl.threadpool_limits(limits=1):
-    time.time()
-    log.info(
-        f"Format: Converting `{FORMAT_FIELD_CHECKPOINT}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
-
-    for _, submodule in model.named_modules():
-        # v1 checkpoint format used to do `qzeros = qzeros -= 1` before serialization, thus the
-        # additions here do not overflow.
-        # v1 checkpoint format with sym=False saved via convert_gptq_v2_to_v1_format() will
-        # overflow ~<=13% based on testing
-        if isinstance(submodule, qlinear_kernel):
-            convert_gptq_v1_to_v2_format_module(module=submodule, bits=cfg.bits, pack_dtype=cfg.pack_dtype)
-
-        #log.info(f"Format: Conversion complete: {time.time() - t}s")
-
-    return model
-
-# public/stable api exposed to transformer/optimum
-def hf_convert_gptq_v2_to_v1_format(
-    model: nn.Module,
-    sym: bool,
-    bits: int,
-    qlinear_kernel: Type[BaseQuantLinear],
-    checkpoint_format: str,
-    meta: Optional[Dict[str, any]],
-) -> Tuple[nn.Module, bool]:
-    # note: sym=False is valid for gptq_v2 for all gptqmodel and gptq(v1) for gptqmodel >= `0.9.0`
-    if sym and checkpoint_format == "gptq_v2":
-        quantize_config = QuantizeConfig(bits=bits)
-        return convert_gptq_v2_to_v1_format(model, quantize_config, qlinear_kernel), True
-    else:
-        return model, False
-
-def convert_gptq_v2_to_v1_format_module(
-    module: BaseQuantLinear,
-    quantize_config: QuantizeConfig,
-):
-    assert isinstance(module, BaseQuantLinear)
-
-    log.info.once("Format: Converting GPTQ v2 to v1")
-
-    if quantize_config.bits == 2:
-        module.qzeros.data -= 0b01010101010101010101010101010101
-    elif quantize_config.bits == 3:
-        module.qzeros.data[:, range(0, module.qzeros.data.shape[1], 3)] -= (
-            0b00100100100100100100100100100100
-        )
-        module.qzeros.data[:, range(1, module.qzeros.data.shape[1], 3)] -= (
-            0b10010010010010010010010010010010
-        )
-        module.qzeros.data[:, range(2, module.qzeros.data.shape[1], 3)] -= (
-            0b01001001001001001001001001001001
-        )
-    elif quantize_config.bits == 4:
-        module.qzeros.data -= 0b00010001000100010001000100010001
-    elif quantize_config.bits == 8:
-        module.qzeros.data -= 0b00000001000000010000000100000001
-    else:
-        raise NotImplementedError("Only 2,3,4,8 bits are supported.")
-
-    module.qzero_format(format=1)
-
-# Optionally convert weight from gptq_v2 to v1 export format if Kernel is compatible with v2
-@torch.inference_mode()
-def convert_gptq_v2_to_v1_format(
-    model,
-    quantize_config: QuantizeConfig,
-    qlinear_kernel: Type[BaseQuantLinear],
-):
-
-    # skip v2 to v1 conversion for gptq_v1 kernels
-    if quantize_config.quant_method in [METHOD.GPTQ] and not qlinear_kernel.REQUIRES_FORMAT_V2:
-        return model
-
-    # Limit thread usage to avoid auto-parallizataion regression
-    # with tctl.threadpool_limits(limits=1):
-    for _, submodule in model.named_modules():
-        # sym=False has underflow probability of ~<=13% during testing. No underflow possible for sym=True.
-        if isinstance(submodule, qlinear_kernel):
-            convert_gptq_v2_to_v1_format_module(module=submodule, quantize_config=quantize_config)
-
-    return model
 
 @torch.inference_mode()
 def pack_module(
@@ -691,6 +470,7 @@ def pack_module(
     quantize_config: Optional[QuantizeConfig] = None,
     quant_result: Optional[Dict[str, Any]] = None,
 ):
+    _ = q_scales_extra, quantize_config, quant_result
     # Limit pack() thread usage to avoid auto-parallizataion regression
     # with ctx(tctl.threadpool_limits(limits=1), lock):
     layer = layers[name]
@@ -708,22 +488,6 @@ def pack_module(
 
     if q_g_idx is not None:
         assert get_device(q_g_idx) == CPU
-        #q_g_idx = q_g_idx.to(CPU)
-
-    pack_impl = "original"
-    target_device = None
-    if quantize_config is not None:
-        pack_impl = getattr(quantize_config, "pack_impl", "original") or "original"
-        cfg_device = getattr(quantize_config, "device", None)
-        if isinstance(cfg_device, DEVICE):
-            target_device = cfg_device.to_torch_device()
-        elif isinstance(cfg_device, torch.device):
-            target_device = cfg_device
-        elif isinstance(cfg_device, str):
-            try:
-                target_device = torch.device(cfg_device)
-            except (RuntimeError, ValueError):
-                log.warning(f"pack_module: unable to parse target device `{cfg_device}`; defaulting to CUDA auto-select.")
 
     packer_label = None
 
@@ -735,18 +499,7 @@ def pack_module(
         layers[name] = layer
         qModules[name] = module
 
-    # TODO FIX ME..remove hard coded qqq pack
-    if quant_linear_cls.QUANT_TYPE == "qqq":
-        if q_scales_extra is not None:
-            q_scales_extra = q_scales_extra.to(CPU)
-        packer_label = "module.pack"
-        with log_time_block(
-            packer_label,
-            logger=log,
-            module_name=name,
-        ):
-            module.pack(linear=layer, scales=q_scales, s_extra=q_scales_extra)
-    elif quant_linear_cls.QUANT_TYPE.startswith("awq_") or quant_linear_cls.QUANT_TYPE == "llm-awq":
+    if quant_linear_cls.QUANT_TYPE.startswith("awq_") or quant_linear_cls.QUANT_TYPE == "llm-awq":
         packer_label = "module.pack"
         with log_time_block(
             packer_label,
@@ -760,83 +513,7 @@ def pack_module(
                 g_idx=q_g_idx,
             )
     else:
-        effective_impl = (pack_impl or "original").lower()
-
-        if effective_impl in {"cpu", "block", "pack_block"}:
-            effective_impl = "block"
-        elif effective_impl in {"original", "pack_original"}:
-            effective_impl = "original"
-        elif effective_impl == "gpu":
-            if not HAS_CUDA:
-                log.warning("pack_module: GPU packing requested but CUDA is unavailable; falling back to original pack.")
-                effective_impl = "original"
-            elif not hasattr(module, "pack_gpu"):
-                log.warning("pack_module: GPU packing requested but module lacks pack_gpu; falling back to original pack.")
-                effective_impl = "original"
-        elif effective_impl != "original":
-            log.warning(
-                "pack_module: Unknown pack_impl `%s`; defaulting to original pack.",
-                pack_impl,
-            )
-            effective_impl = "original"
-
-        label_map = {
-            "gpu": "module.pack_gpu",
-            "block": "module.pack_block",
-            "original": "module.pack_original",
-        }
-
-        packer_label = label_map[effective_impl]
-
-        with log_time_block(
-            packer_label,
-            logger=log,
-            module_name=name,
-        ):
-            if effective_impl == "gpu":
-                try:
-                    module.pack_gpu(
-                        linear=layer,
-                        scales=q_scales,
-                        zeros=q_zeros,
-                        g_idx=q_g_idx,
-                        device=target_device,
-                    )
-                except ValueError:
-                    module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
-            elif effective_impl == "block":
-                try:
-                    module.pack_block(
-                        linear=layer,
-                        scales=q_scales,
-                        zeros=q_zeros,
-                        g_idx=q_g_idx,
-                    )
-                except ValueError:
-                    module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
-            else:
-                module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
-
-        if (
-            quantize_config is not None
-            and quantize_config.quant_method == METHOD.GPTQ
-            and quantize_config.format == FORMAT.GPTQ
-            and getattr(quant_linear_cls, "REQUIRES_FORMAT_V2", False)
-        ):
-            with log_time_block(
-                "convert_v2_to_v1",
-                logger=log,
-                module_name=name,
-            ):
-                convert_gptq_v2_to_v1_format_module(
-                    module=module,
-                    quantize_config=quantize_config,
-                )
-
-        # TODO: why move it back to gpu?
-        # start = time.time()
-        # qModules[name].to(layer_device)
-        # log.info(f"Pack: moving module back to `{layer_device}` cost = {time.time()-start} seconds")
+        raise ValueError(f"AWQ-only build does not support quant kernel type `{quant_linear_cls.QUANT_TYPE}`.")
 
     return packer_label
 
@@ -974,136 +651,13 @@ def hf_gptqmodel_post_init(model, use_act_order: bool, quantize_config: Quantize
 
 def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None,
                         max_input_length: Optional[int] = None):
-    """
-    The max_input_length argument is specific to the exllama backend, that requires to initialize a buffer temp_state.
-    """
-    # post init for bitblas backend.
-    device_to_buffers_size = {}
-    # exllama
-    model_uses_exllama = False
-
-    # exllamav2
-    fixed_bytes = {}
-    model_uses_exllamav2 = False
-
-    for name, submodule in model.named_modules():
-        if isinstance(submodule, ExllamaV2QuantLinear):
-            model_uses_exllamav2 = True
-            device = submodule.qweight.device
-            scratch_fixed = submodule.scratch_space_fixed()
-            fixed_bytes[device] = max(scratch_fixed, fixed_bytes.get(device, 0))
-        elif isinstance(submodule, AwqExllamaV2QuantLinear):
-            model_uses_exllamav2 = True
-            device = submodule.qweight.device
-            scratch_fixed = submodule.scratch_space_fixed(
-                max_input_len=max_input_length or 2048,
-                max_batch_size=int(os.getenv("AWQ_BATCH_SIZE", 1))
-            )
-            fixed_bytes[device] = max(scratch_fixed, fixed_bytes.get(device, 0))
-        elif isinstance(submodule, ExllamaQuantLinear):
-            model_uses_exllama = True
-            device = submodule.qweight.device
-            if device not in device_to_buffers_size:
-                device_to_buffers_size[device] = {
-                    "max_dq_buffer_size": 1,
-                    "max_inner_outer_dim": 1,
-                }
-            submodule._use_act_order = True if use_act_order else False
-
-            # Disable this heuristic for detecting act_order, but it could be used instead of the config.
-            """
-            if submodule.g_idx is None:
-                submodule.act_order = False
-            elif submodule.g_idx is not None and ((submodule.g_idx == 0).all() or torch.equal(submodule.g_idx.cpu(), torch.tensor([i // submodule.group_size for i in range(submodule.g_idx.shape[0])], dtype=torch.int32))):
-                submodule.g_idx = None
-                submodule.act_order = False
-            else:
-                submodule.act_order = True
-            """
-
-            device_to_buffers_size[device]["max_dq_buffer_size"] = max(
-                device_to_buffers_size[device]["max_dq_buffer_size"],
-                submodule.qweight.numel() * 8,
-                )
-
-            if use_act_order:
-                device_to_buffers_size[device]["max_inner_outer_dim"] = max(
-                    device_to_buffers_size[device]["max_inner_outer_dim"],
-                    submodule.in_features,
-                    submodule.out_features,
-                )
-
-    if model_uses_exllama:
-        # To be honest this is quite ugly, not proud of this.
-        from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params
-
-        device_to_buffers = {}
-
-        if use_act_order:
-            if max_input_length is None:
-                max_input_len = EXLLAMA_DEFAULT_MAX_INPUT_LENGTH
-            else:
-                max_input_len = max_input_length
-        else:
-            if max_input_length is not None:
-                log.info(
-                    "Using exllama backend without act-order, the parameter max_input_length was set although not needed, it will be ignored."
-                )
-            max_input_len = 1
-
-        for device, buffers_size in device_to_buffers_size.items():
-            # The temp_state buffer is required to reorder X in the act-order case.
-            # The temp_dq buffer is required to dequantize weights when using cuBLAS, typically for the prefill.
-            device_to_buffers[device] = {
-                "temp_state": torch.zeros(
-                    (max_input_len, buffers_size["max_inner_outer_dim"]),
-                    dtype=torch.float16,
-                    device=device,
-                ),
-                "temp_dq": torch.zeros(
-                    (1, buffers_size["max_dq_buffer_size"]),
-                    dtype=torch.float16,
-                    device=device,
-                ),
-                "max_dq_buffer_size": buffers_size["max_dq_buffer_size"],
-                "max_inner_outer_dim": buffers_size["max_inner_outer_dim"],
-            }
-
-        # Buffers need to be persistent to avoid any bug.
-        model.device_to_buffers = device_to_buffers
-
-        for device, buffers in model.device_to_buffers.items():
-            prepare_buffers(device, buffers["temp_state"], buffers["temp_dq"])
-
-        # Using the default from exllama repo here.
-        matmul_recons_thd = 16
-        matmul_fused_remap = False
-        matmul_no_half2 = False
-        set_tuning_params(matmul_recons_thd, matmul_fused_remap, matmul_no_half2)
-
-    if model_uses_exllamav2:
-        from ..utils.exllamav2 import ScratchSpace
-
-        # we allocate a model-persistent scratch space for each device
-        device_tensors = {}
-        for device, scratch_bytes in fixed_bytes.items():
-            device_tensors[device] = ScratchSpace(scratch_bytes=scratch_bytes, dev=device)
-
-        # have persistent buffers, otherwise we will get OOM
-        model.device_tensors = device_tensors
-
-    # The buffers need to have been initialized first before calling make_q4.
+    # AWQ-only build keeps post-init minimal: every quant linear handles its own setup.
+    _ = use_act_order, quantize_config, max_input_length
     for _, submodule in model.named_modules():
-        if isinstance(submodule, (ExllamaV2QuantLinear, AwqExllamaV2QuantLinear)):
-            device = submodule.qweight.device
-            submodule.post_init(scratch_space=model.device_tensors[device])
-        elif isinstance(submodule, BaseQuantLinear):
+        if isinstance(submodule, BaseQuantLinear):
             submodule.post_init()
 
     torch_empty_cache()
-
-    # if use_act_order and max_input_length and isinstance(submodule, ExllamaQuantLinear):
-    #     model = exllama_set_max_input_length(model, max_input_length)
 
     return model
 

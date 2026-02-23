@@ -27,8 +27,6 @@ import torch
 import torch.nn as nn
 
 from ..looper.dequantize_processor import DequantizeProcessor
-from ..looper.eora_processor import EoraProcessor
-from ..looper.gptq_processor import GPTQProcessor
 from ..looper.input_cache import InputCache
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
@@ -58,7 +56,6 @@ from ..utils.offload import offload_to_disk
 from ..utils.torch import (CPU, META, timed_gc_collect, torch_sync, tf32_high_precision_guard)
 from .. import DEVICE_THREAD_POOL
 from .awq_processor import AWQProcessor
-from .qqq_processor import QQQProcessor
 from .stage_inputs_capture import StageInputsCapture
 from .stage_layer import run_layer_stage
 
@@ -1427,8 +1424,7 @@ class ModuleLooper():
 
         for p_index, processor in enumerate(self.processors):
             if not processor.verify_calibration_dataset(p_index):
-                if isinstance(processor, EoraProcessor) or\
-                        (isinstance(processor, GPTQProcessor) and self.gptq_model.quantize_config.gptaq is not None):
+                if processor.name() == "native":
                     prev_processor = self.processors[p_index - 1]
                     processor.set_calibration_dataset(prev_processor.calibration_dataset)
                     # If calibration_dataset is None or Empty, the input_cache of the previous processor is used.
@@ -1544,19 +1540,13 @@ class ModuleLooper():
             for index, reverse_p in enumerate(reversed_processors, start=1):
                 # Finalize processors in reverse order
                 self._check_loop_stop()
-                if isinstance(reverse_p, GPTQProcessor):
-                    pass
-                elif isinstance(reverse_p, EoraProcessor):
-                    pass
-                elif isinstance(reverse_p, DequantizeProcessor):
+                if isinstance(reverse_p, DequantizeProcessor):
                     pass
                 else:
                     log.info(f"{reverse_p.name()} summary:\n{reverse_p.log}")
 
                 processor_name = reverse_p.name()
                 total_log[processor_name] = reverse_p.log
-                if processor_name in ["gptq", "gptq v2"]:
-                    self.gptq_model.quant_log = reverse_p.log
 
                 for module_log in reverse_p.log:
                     log.info(module_log)
@@ -1615,10 +1605,6 @@ class ModuleLooper():
                                            layer_index=layer_index)
                 if capture_only_flags.get(name, False):
                     named_module.state["capture_only"] = True
-                if isinstance(processor, EoraProcessor):
-                    named_module.state.update({
-                        "wq": processor.quantized_weights[layer_name],
-                    })
 
                 subset[name] = named_module
                 full[name] = named_module
@@ -1627,10 +1613,7 @@ class ModuleLooper():
             elif capture_only_flags.get(name, False):
                 subset[name].state["capture_only"] = True
 
-            if isinstance(processor, GPTQProcessor):
-                processor.preprocess(subset[name], failsafe=failsafe)
-            else:
-                processor.preprocess(subset[name])
+            processor.preprocess(subset[name])
             # some modules are skipped
             if processor.is_skipped(subset[name]):
                 skipped_modules.append(name)

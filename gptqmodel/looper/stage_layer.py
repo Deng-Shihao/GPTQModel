@@ -19,9 +19,7 @@ import torch
 
 from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.awq_processor import AWQProcessor
-from ..looper.gptq_processor import GPTQProcessor
 from ..looper.named_module import NamedModule
-from ..looper.qqq_processor import QQQProcessor
 from ..utils.device import get_device, get_device_new
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import find_modules, get_module
@@ -380,7 +378,7 @@ def run_layer_stage(
                             process.submodule_finalize(module, looper.gptq_model)
 
                         # Disk offload (lifecycle TODO note preserved)
-                        if isinstance(process, (GPTQProcessor, QQQProcessor, AWQProcessor)):
+                        if isinstance(process, AWQProcessor):
                             quant_config = getattr(looper.gptq_model, "quantize_config", None)
                             if quant_config and getattr(quant_config, "offload_to_disk", False):
                                 offload_path = getattr(quant_config, "offload_to_disk_path", None)

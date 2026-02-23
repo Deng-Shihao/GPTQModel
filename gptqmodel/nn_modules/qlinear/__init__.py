@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-import copy
 import math
 import os
 import sys
@@ -16,7 +15,6 @@ import torch.nn as nn
 import transformers
 from torch.nn.modules.conv import _ConvNd
 
-from ...adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
@@ -46,7 +44,6 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY: List[int] = None
 
     SUPPORTS_PACK_DTYPES: List[t.dtype] = None
-    SUPPORTS_ADAPTERS: List[Adapter] = None
     SUPPORTS_DEVICES: List[DEVICE] = None
     SUPPORTS_PLATFORM: List[PLATFORM] = None
 
@@ -64,7 +61,6 @@ class BaseQuantLinear(nn.Module):
                  bias: bool,
                  pack_dtype: t.dtype,
                  backend: BACKEND,
-                 adapter: Adapter,
                  name: str = None,
                  register_buffers: bool = False,
                  register_buffers_in_features: int = None,
@@ -84,9 +80,6 @@ class BaseQuantLinear(nn.Module):
         self.backend = backend
         self.maxq = 2 ** self.bits - 1
         self.pack_dtype = pack_dtype
-        # we need to clone the adapter since passed in adapter may be shared
-        # adapter tensors are lodaed inside adapter so they must be unique per module
-        self.adapter =  copy.deepcopy(adapter)
 
         self.optimized = False
 
@@ -154,38 +147,6 @@ class BaseQuantLinear(nn.Module):
             else:
                 self.bias = None
 
-        # load adapter if any
-        if adapter is not None:
-            if adapter.path in LORA_MERGED_WEIGHT_PATHS:
-                print(f"Adapter (merged weights) lazy init: {self.adapter.name()}: {self.adapter}, module: {self.name}")
-
-                # pre allocate buffers so accelerate can auto-bind merged weights in same tensor file as model
-                self.register_buffer(
-                    "lora_A",
-                    t.zeros((in_features, adapter.rank), dtype=t.float16),
-                )
-
-                self.register_buffer(
-                    "lora_B",
-                    t.zeros((adapter.rank, out_features), dtype=t.float16),
-                )
-            else:
-                pass
-                # print(f"Adapter lazy init: {self.adapter.name()}: {self.adapter}, module: {self.name}")
-
-            # TDOO: allow merged lora weights exist in gptq model safetensor file for direct loading
-            # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
-            # self.register_buffer(
-            #     "lora_A",
-            #     torch.zeros((in_features, 128), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora_test math
-            # )
-            #
-            # # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
-            # self.register_buffer(
-            #     "lora_B",
-            #     torch.zeros((128, out_features), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora_test math
-            # )
-
     def list_buffers(self) -> List:
         buf = []
         if hasattr(self, "qweight") and self.qweight is not None:
@@ -215,12 +176,7 @@ class BaseQuantLinear(nn.Module):
 
     # override me, to perform post-weight load to device init
     def post_init(self):
-        if self.adapter is not None:
-            self.adapter.post_init(
-                weight_key=self.name,
-                device=self.list_buffers()[0].device,
-                lora_A=getattr(self, "lora_A", None),
-                lora_B=getattr(self, "lora_B", None))
+        return
 
     @classmethod
     @lru_cache(maxsize=1024)
@@ -252,7 +208,6 @@ class BaseQuantLinear(nn.Module):
             dynamic:Optional[dict]=None,
             device:Optional[DEVICE]=None,
             trainable:Optional[bool]=None,
-            adapter:Optional[Adapter]=None,
     ) -> Tuple[
         bool, Optional[Exception]]:
         ok_once, exp_once = cls.cached_validate_once()
@@ -261,7 +216,7 @@ class BaseQuantLinear(nn.Module):
 
         return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
                              in_features=in_features, out_features=out_features, pack_dtype=pack_dtype,
-                             dtype=dtype, dynamic=dynamic, device=device, trainable=trainable, adapter=adapter)
+                             dtype=dtype, dynamic=dynamic, device=device, trainable=trainable)
 
     @classmethod
     # internal method and should not be overriden
@@ -301,12 +256,8 @@ class BaseQuantLinear(nn.Module):
 
     @classmethod
     def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, dynamic:Optional[dict]=None, in_features:int=None,
-                  out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
+                  out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[bool, Optional[Exception]]:
         cls.verify_supports_params()
-
-        if adapter is not None and adapter.__class__ not in cls.SUPPORTS_ADAPTERS:
-            err = f"{cls} does not support adapter: {adapter}"
-            return False, NotImplementedError(err)
 
         if pack_dtype not in cls.SUPPORTS_PACK_DTYPES:
             err = f"{cls} does not support `pack_dtype`: {pack_dtype}"

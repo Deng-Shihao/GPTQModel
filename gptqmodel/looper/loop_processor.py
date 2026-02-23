@@ -352,7 +352,7 @@ class LoopProcessor:
         if isinstance(bias, torch.Tensor):
             total_bytes += bias.numel() * bias.element_size()
 
-        # account for persistent tensors captured in module.state (e.g., q_scales, adapters)
+        # account for persistent tensors captured in module.state (e.g., q_scales)
         total_bytes += self._state_tensor_bytes(module)
 
         dtype = dtype or getattr(module, "module_dtype", None)
@@ -382,13 +382,6 @@ class LoopProcessor:
 
         if isinstance(obj, dict):
             return sum(self._collect_tensor_bytes(item, seen) for item in obj.values())
-
-        # handle known adapter containers without traversing entire nn.Module graphs
-        if hasattr(obj, "lora_A") and hasattr(obj, "lora_B"):
-            return (
-                self._collect_tensor_bytes(obj.lora_A, seen)
-                + self._collect_tensor_bytes(obj.lora_B, seen)
-            )
 
         return 0
 
@@ -573,7 +566,7 @@ class LoopProcessor:
     def preprocess(self, module: NamedModule, **kwargs):
         pass
 
-    # after preproces, this process may be skipped due to dynamic override (lora adapter = None)
+    # after preprocess, this process may be skipped due to dynamic override
     def is_skipped(self, module: NamedModule) -> bool:
         pass
 

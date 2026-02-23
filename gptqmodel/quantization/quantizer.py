@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-# adapted from @qwopqwop200 's [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda), which itself is based on [gptq](https://github.com/IST-DASLab/gptq)
+# AWQ-only quantizer helpers.
 
 import torch
 import torch.nn as nn
@@ -165,9 +165,5 @@ class Quantizer(nn.Module):
 
     # def ready(self):
     # return torch.all(self.scale != 0)
-
-class QQQQuantizer(Quantizer):
-    def requires_groupwise_processing(self) -> bool:
-        return self.qcfg.group_size == -1 and self.qcfg.sym
 
 __all__ = ["Quantizer"]

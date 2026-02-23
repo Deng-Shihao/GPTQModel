@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from . import LlamaQModel
+from .llama import LlamaQModel
 
 
 class Qwen3QModel(LlamaQModel):

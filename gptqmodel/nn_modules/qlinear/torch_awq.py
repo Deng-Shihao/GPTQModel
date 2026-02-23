@@ -5,7 +5,6 @@
 
 import torch
 
-from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import dequantize_gemm
@@ -34,7 +33,6 @@ class AwqTorchQuantLinear(AWQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.ALL]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPPORTS_ADAPTERS = [Lora]
 
     SUPPORTS_DTYPES = [torch.float16]
 
@@ -52,7 +50,6 @@ class AwqTorchQuantLinear(AWQuantLinear):
         out_features: int,
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
-        adapter: Adapter = None,
         register_buffers: bool = False,
         **kwargs,
     ):
@@ -66,7 +63,6 @@ class AwqTorchQuantLinear(AWQuantLinear):
             bias=bias,
             pack_dtype=pack_dtype,
             backend=kwargs.pop("backend", BACKEND.TORCH_AWQ),
-            adapter=adapter,
             register_buffers=register_buffers,
             **kwargs,
         )
@@ -100,9 +96,6 @@ class AwqTorchQuantLinear(AWQuantLinear):
 
         if self.bias is not None:
             output = output + self.bias
-
-        if self.adapter:
-            output = self.adapter.apply(x=x_flat, out=output)
 
         output = output.reshape(original_shape)
 

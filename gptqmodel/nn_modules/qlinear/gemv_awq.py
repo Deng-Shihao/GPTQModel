@@ -6,7 +6,6 @@
 import torch
 from torch import nn
 
-from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization import FORMAT, METHOD
@@ -37,7 +36,6 @@ class AwqGEMVQuantLinear(AWQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.ALL]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPPORTS_ADAPTERS = [Lora]
 
     SUPPORTS_DTYPES = [torch.float16]
 
@@ -54,7 +52,6 @@ class AwqGEMVQuantLinear(AWQuantLinear):
         out_features: int,
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
-        adapter: Adapter = None,
         register_buffers: bool = False,
         **kwargs,
     ):
@@ -69,7 +66,6 @@ class AwqGEMVQuantLinear(AWQuantLinear):
             bias=bias,
             pack_dtype=pack_dtype,
             backend=backend,
-            adapter=adapter,
             register_buffers=False,
             **kwargs)
 
@@ -147,9 +143,6 @@ class AwqGEMVQuantLinear(AWQuantLinear):
             out = out.to(dtype=input_dtype)
 
         out = out + self.bias if self.bias is not None else out
-
-        if self.adapter:
-            out = self.adapter.apply(x=x, out=out)
 
         return out.reshape(out_shape)
 

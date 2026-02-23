@@ -6,7 +6,6 @@
 import torch
 from torch import nn
 
-from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization import FORMAT, METHOD
@@ -80,7 +79,6 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.ALL]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int16]
-    SUPPORTS_ADAPTERS = [Lora]
 
     SUPPORTS_DTYPES = [torch.float16]
 
@@ -99,7 +97,6 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
             out_features: int,
             bias: bool = False,
             pack_dtype: torch.dtype = torch.int16,
-            adapter: Adapter = None,
             register_buffers: bool = False,
             **kwargs,
     ):
@@ -114,7 +111,6 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
             bias=bias,
             pack_dtype=pack_dtype,
             backend=backend,
-            adapter=adapter,
             register_buffers=False,
             **kwargs)
 
@@ -194,9 +190,6 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
 
         out = out + self.bias if self.bias is not None else out
 
-        if self.adapter:
-            out = self.adapter.apply(x=x, out=out)
-
         return out
 
     def pack(self, linear: nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor = None):
@@ -271,7 +264,6 @@ class LLMAwqQuantLinear(AwqGEMVFastQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.ALL]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int16]
-    SUPPORTS_ADAPTERS = [Lora]
 
     SUPPORTS_DTYPES = [torch.float16]
 

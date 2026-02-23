@@ -11,8 +11,6 @@ from typing import Dict, List, Optional, Type, Union
 
 import torch
 
-from gptqmodel.adapter.adapter import Adapter
-
 from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ..quantization import FORMAT, METHOD
@@ -89,9 +87,18 @@ def get_kernel_for_backend(backend: BACKEND, quant_method: METHOD, fmt: FORMAT) 
 def _import_all_qlinear_kernels() -> None:
     from ..nn_modules import qlinear as qlinear_pkg
 
+    # AWQ-only import surface to avoid loading unrelated kernel modules/deps.
+    awq_kernel_modules = {
+        "gemm_awq",
+        "gemm_awq_triton",
+        "gemv_awq",
+        "gemv_fast_awq",
+        "torch_awq",
+    }
+
     for module_info in pkgutil.iter_modules(qlinear_pkg.__path__):
         name = module_info.name
-        if name.startswith("_"):
+        if name.startswith("_") or name not in awq_kernel_modules:
             continue
         try:
             importlib.import_module(f"{qlinear_pkg.__name__}.{name}")
@@ -315,13 +322,12 @@ def hf_select_quant_linear(
         sym=sym,
         backend=backend,
         device=device,
-        format=FORMAT.GPTQ,
-        quant_method=METHOD.GPTQ,
+        format=FORMAT.GEMM,
+        quant_method=METHOD.AWQ,
         pack=pack,
-        allow_marlin=True, # TODO: remove this after marlin padding is fixed
+        allow_marlin=False,
         dynamic=None,
         pack_dtype=torch.int32,
-        adapter=None,
     )
 
 # public/stable api exposed to transformer/optimum
@@ -403,7 +409,6 @@ def hf_select_quant_linear_v2(
         dynamic=None,
         pack_dtype=pack_dtype,
         dtype=normalized_dtype,
-        adapter=None,
     )
 
 
@@ -415,15 +420,14 @@ def select_quant_linear(
         sym: bool,
         device: DEVICE,
         backend: BACKEND = BACKEND.AUTO,
-        format: FORMAT = FORMAT.GPTQ,
-        quant_method: METHOD = METHOD.GPTQ,
+        format: FORMAT = FORMAT.GEMM,
+        quant_method: METHOD = METHOD.AWQ,
         pack: bool = False,
-        allow_marlin: bool = True,  # TODO: remove this after marlin padding is fixed
+        allow_marlin: bool = False,
         dynamic=None,
         pack_dtype: torch.dtype = None,
         dtype: Optional[torch.dtype] = None,
         multi_select: bool = False, # return all valid kernels
-        adapter: Optional[Adapter] = None,
 ) -> Union[Type[BaseQuantLinear], List[Type[BaseQuantLinear]]]:
     if isinstance(format, str):
         format = FORMAT(format.lower())
@@ -461,7 +465,6 @@ def select_quant_linear(
                 dynamic=dynamic,
                 device=device,
                 trainable=trainable,
-                adapter=adapter,
             )
             if os.environ.get("DEBUG") and not validate:
                 log.info(f"skip {k} for {str(err)}")

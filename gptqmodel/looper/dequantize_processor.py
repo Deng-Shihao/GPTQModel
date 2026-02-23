@@ -10,13 +10,14 @@ import torch
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..nn_modules.qlinear.torch import TorchQuantLinear
+from ..nn_modules.qlinear import BaseQuantLinear
+from ..quantization.awq.utils.packing_utils import dequantize_gemm
 from ..utils.logger import setup_logger
 
 log = setup_logger()
 
 class DequantizeProcessor(LoopProcessor):
-    def __init__(self, quantized_modules: Dict[str, TorchQuantLinear]):
+    def __init__(self, quantized_modules: Dict[str, BaseQuantLinear]):
         super().__init__(tokenizer=None, qcfg=None, calibration=None, calibration_concat_size=None,
                          prepare_dataset_func=None, batch_size=1,
                          require_fwd=False)
@@ -51,7 +52,22 @@ class DequantizeProcessor(LoopProcessor):
         if isinstance(tp_info, dict):
             pad_cols = int(tp_info.get("pad_cols", 0) or 0)
 
-        wq = m.dequantize_weight().T.to(device=device)
+        if hasattr(m, "dequantize_weight") and callable(getattr(m, "dequantize_weight")):
+            wq = m.dequantize_weight().T.to(device=device)
+        elif all(hasattr(m, name) for name in ("qweight", "qzeros", "scales", "bits", "group_size")):
+            wq = dequantize_gemm(
+                qweight=m.qweight,
+                qzeros=m.qzeros,
+                scales=m.scales,
+                bits=m.bits,
+                group_size=m.group_size,
+                sym=getattr(m, "sym", False),
+            ).to(device=device)
+        else:
+            raise TypeError(
+                f"DequantizeProcessor: unsupported quant module type `{type(m).__name__}`; "
+                "expected `dequantize_weight()` or AWQ packed tensors."
+            )
         if pad_cols:
             pad = wq.new_zeros((wq.shape[0], pad_cols))
             wq = torch.cat((wq, pad), dim=1)
