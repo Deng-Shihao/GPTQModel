@@ -95,7 +95,7 @@ class ModuleLooper():
     """
     def __init__(self, model: BaseQModel, processors: List[LoopProcessor]):
         self.processors = processors
-        self.gptq_model = model
+        self.quant_model = model
 
         # Initialize pause/resume controller first
         self.pause_controller = PauseResumeController()
@@ -130,14 +130,14 @@ class ModuleLooper():
                     f"{io_write_speed:.1f} MB/s."
                 )
 
-        quant_device_hint = getattr(self.gptq_model.quantize_config, "device", None)
+        quant_device_hint = getattr(self.quant_model.quantize_config, "device", None)
         normalized_quant_device = normalize_device_like(quant_device_hint)
         quant_devices = select_forward_devices(normalized_quant_device) if normalized_quant_device else [CPU]
         if not quant_devices:
             quant_devices = [CPU]
 
         # Apply compute device filter if provided to determine which devices to use for quantization
-        compute_device_filter = getattr(self.gptq_model.quantize_config, "compute_device_filter", None)
+        compute_device_filter = getattr(self.quant_model.quantize_config, "compute_device_filter", None)
         if compute_device_filter is not None:
             quant_devices_filtered = compute_device_filter(quant_devices)
             if len(quant_devices_filtered) >= 1:
@@ -152,37 +152,37 @@ class ModuleLooper():
         self._quant_device_rr = 0
         self._module_device_map: Dict[str, torch.device] = {}
         self._quant_device_lock = threading.Lock()
-        vram_strategy = getattr(self.gptq_model.quantize_config, "vram_strategy", VramStrategy.EXCLUSIVE)
+        vram_strategy = getattr(self.quant_model.quantize_config, "vram_strategy", VramStrategy.EXCLUSIVE)
         if isinstance(vram_strategy, str):
             try:
                 vram_strategy = VramStrategy(vram_strategy.lower())
             except ValueError:
                 vram_strategy = VramStrategy.EXCLUSIVE
-        supported_strategies = getattr(self.gptq_model, "supported_vram_strategies", [VramStrategy.EXCLUSIVE, VramStrategy.BALANCED])
+        supported_strategies = getattr(self.quant_model, "supported_vram_strategies", [VramStrategy.EXCLUSIVE, VramStrategy.BALANCED])
         if isinstance(supported_strategies, VramStrategy):
             supported_strategies = [supported_strategies]
         if vram_strategy not in supported_strategies:
             log.debug(
                 "ModuleLooper: Model %s does not support VRAM strategy %s; falling back to exclusive.",
-                getattr(self.gptq_model, "__class__", type(self.gptq_model)).__name__,
+                getattr(self.quant_model, "__class__", type(self.quant_model)).__name__,
                 vram_strategy,
             )
             vram_strategy = VramStrategy.EXCLUSIVE
         self._vram_strategy = vram_strategy
 
         self._moe_subset_threshold = 16
-        self._subset_callback = getattr(self.gptq_model, "subset_callback", None)
+        self._subset_callback = getattr(self.quant_model, "subset_callback", None)
 
         # Track current subset for MoE lifecycle hooks
         self._current_subset: Optional[Dict[str, Any]] = None
 
         # moe_routing_override is only required for MoE models (i.e., models with dynamic_expert_index).
-        if getattr(self.gptq_model, "dynamic_expert_index", None):
-            num_experts = self.gptq_model.get_num_experts(self.gptq_model.model.config)
-            self.moe_routing_override = self.gptq_model.quantize_config.moe_routing_override(num_experts)
+        if getattr(self.quant_model, "dynamic_expert_index", None):
+            num_experts = self.quant_model.get_num_experts(self.quant_model.model.config)
+            self.moe_routing_override = self.quant_model.quantize_config.moe_routing_override(num_experts)
         else:
             self.moe_routing_override = None
-        self.moe_routing_bypass = self.gptq_model.quantize_config.moe_routing_bypass()
+        self.moe_routing_bypass = self.quant_model.quantize_config.moe_routing_bypass()
 
         for processor in self.processors:
             self._processor_mask_tls(processor)
@@ -230,8 +230,8 @@ class ModuleLooper():
         def __enter__(self):
             """Set up MoE lifecycle hooks if applicable."""
             if self.module_looper._should_use_moe_lifecycle(self.module, self.processor):
-                hooks = self.module_looper.gptq_model.moe_lifecycle_hooks
-                self.moe_block = hooks.get_moe_block(self.module, self.module_looper.gptq_model.__class__)
+                hooks = self.module_looper.quant_model.moe_lifecycle_hooks
+                self.moe_block = hooks.get_moe_block(self.module, self.module_looper.quant_model.__class__)
 
                 if self.moe_block is not None:
                     # Save original forward method
@@ -247,7 +247,7 @@ class ModuleLooper():
                             processor=self.processor,
                             subset=self.current_subset,
                             original_forward=self.moe_forward_original,
-                            model_class=self.module_looper.gptq_model.__class__,
+                            model_class=self.module_looper.quant_model.__class__,
                             module_looper=self.module_looper,  # Pass for TLS-based hooks pausing
                             moe_block_prefix=moe_block_prefix,
                             replica_module=self.module,  # Pass replica for device-correct module resolution
@@ -294,9 +294,9 @@ class ModuleLooper():
         for candidate in (
             getattr(self, "_layer_callback", None),
             getattr(self, "layer_callback", None),
-            getattr(self.gptq_model, "layer_callback", None),
-            getattr(self.gptq_model, "callbackup", None),
-            getattr(self.gptq_model, "callback", None),
+            getattr(self.quant_model, "layer_callback", None),
+            getattr(self.quant_model, "callbackup", None),
+            getattr(self.quant_model, "callback", None),
         ):
             if candidate is not None:
                 return candidate
@@ -306,7 +306,7 @@ class ModuleLooper():
         for candidate in (
             getattr(self, "_subset_callback", None),
             getattr(self, "subset_callback", None),
-            getattr(self.gptq_model, "subset_callback", None),
+            getattr(self.quant_model, "subset_callback", None),
         ):
             if candidate is not None:
                 return candidate
@@ -604,22 +604,22 @@ class ModuleLooper():
         - Module contains an MoE block
         """
         # Check if feature is enabled
-        flag_enabled = self.gptq_model.quantize_config.moe_routing_bypass()
+        flag_enabled = self.quant_model.quantize_config.moe_routing_bypass()
         if not flag_enabled:
             return False
 
         # Check if model has lifecycle hooks
-        hooks = getattr(self.gptq_model, 'moe_lifecycle_hooks', None)
+        hooks = getattr(self.quant_model, 'moe_lifecycle_hooks', None)
         if hooks is None:
             log.warn(
-                f"pass_whole_dataset_to_each_expert is enabled but {self.gptq_model.__class__.__name__} "
+                f"pass_whole_dataset_to_each_expert is enabled but {self.quant_model.__class__.__name__} "
                 f"model does not have 'moe_lifecycle_hooks' configured. MoE optimization will be disabled. "
                 f"Please ensure your model definition has proper MoE lifecycle hooks configured."
             )
             return False
 
         # Check if this module contains an MoE block
-        moe_block = hooks.get_moe_block(module, self.gptq_model.__class__)
+        moe_block = hooks.get_moe_block(module, self.quant_model.__class__)
         if moe_block is None:
             log.warn(
                 f"pass_whole_dataset_to_each_expert is enabled but no MoE block found in module "
@@ -818,7 +818,7 @@ class ModuleLooper():
         the next processor stage when ``need_outputs`` is set.
         """
         if not force_serial:
-            quant_config = getattr(self.gptq_model, "quantize_config", None)
+            quant_config = getattr(self.quant_model, "quantize_config", None)
             if quant_config is not None and not getattr(quant_config, "auto_forward_data_parallel", True):
                 force_serial = True
         if force_serial:
@@ -1151,8 +1151,8 @@ class ModuleLooper():
             processed_rows = 0
 
             # Apply compute device filter if provided to determine which devices to use for forward execution
-            if self.gptq_model.quantize_config.compute_device_filter is not None:
-                forward_devices = self.gptq_model.quantize_config.compute_device_filter(devices)
+            if self.quant_model.quantize_config.compute_device_filter is not None:
+                forward_devices = self.quant_model.quantize_config.compute_device_filter(devices)
                 if len(forward_devices) < 1:
                     log.warn(
                         "compute_device_filter returned empty device list. "
@@ -1285,7 +1285,7 @@ class ModuleLooper():
 
             keep = self._get_processor_mask(processor)
 
-            timer = getattr(self.gptq_model, "quant_region_timer", None)
+            timer = getattr(self.quant_model, "quant_region_timer", None)
             start = time.perf_counter() if timer else None
 
             # Mask first tensor-like input if it's [B, S, ...]
@@ -1343,7 +1343,7 @@ class ModuleLooper():
             # Get mask using TLS (thread-safe)
             keep = self._get_processor_mask(processor)
 
-            timer = getattr(self.gptq_model, "quant_region_timer", None)
+            timer = getattr(self.quant_model, "quant_region_timer", None)
             start = time.perf_counter() if timer else None
 
             # Mask first tensor-like input if it's [B, S, ...]
@@ -1390,33 +1390,33 @@ class ModuleLooper():
     @torch.inference_mode()
     def _loop_impl(self, failsafe=None, **kwargs):
         if failsafe is None:
-            failsafe = getattr(self.gptq_model.quantize_config, "failsafe", None)
+            failsafe = getattr(self.quant_model.quantize_config, "failsafe", None)
 
-        if self.gptq_model.quantize_config.lm_head:
-            if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
-                tied_keys = self.gptq_model.model._tied_weights_keys
+        if self.quant_model.quantize_config.lm_head:
+            if self.quant_model.model.config.tie_word_embeddings and hasattr(self.quant_model.model.model, "_tied_weights_keys"):
+                tied_keys = self.quant_model.model._tied_weights_keys
                 for item in tied_keys:
-                    if self.gptq_model.lm_head in item:
+                    if self.quant_model.lm_head in item:
                         raise NotImplementedError("quantization of `lm_head` layer with `tied_weights=True` model state is not supported. Please check model has `tied_weights=False`.")
 
-            lm_head_module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
-            if get_module(self.gptq_model.model, key=self.gptq_model.lm_head) is None:
-                raise ValueError(f"could not find layer {self.gptq_model.lm_head} in the model, exit...")
+            lm_head_module = get_module(self.quant_model.model, key=self.quant_model.lm_head)
+            if get_module(self.quant_model.model, key=self.quant_model.lm_head) is None:
+                raise ValueError(f"could not find layer {self.quant_model.lm_head} in the model, exit...")
 
             if not isinstance(lm_head_module, tuple(SUPPORTS_MODULE_TYPES)):
                 raise NotImplementedError(f"This type({type(lm_head_module)}) of lm_head quantization is currently not "
                                           f"supported. SUPPORTS_MODULE_TYPES is {SUPPORTS_MODULE_TYPES}")
 
             lm_head_quant_config = {"bits": 8, "group_size": 32, "sym": True, "desc_act": False, "mse": 2.4}
-            if self.gptq_model.quantize_config.dynamic is None:
-                self.gptq_model.quantize_config.dynamic = {self.gptq_model.lm_head: lm_head_quant_config}
-            elif self.gptq_model.quantize_config.dynamic_get(self.gptq_model.lm_head, default=None) is None:
-                self.gptq_model.quantize_config.dynamic[self.gptq_model.lm_head] = lm_head_quant_config
+            if self.quant_model.quantize_config.dynamic is None:
+                self.quant_model.quantize_config.dynamic = {self.quant_model.lm_head: lm_head_quant_config}
+            elif self.quant_model.quantize_config.dynamic_get(self.quant_model.lm_head, default=None) is None:
+                self.quant_model.quantize_config.dynamic[self.quant_model.lm_head] = lm_head_quant_config
 
-        forward_pass_use_cache = self.gptq_model.model.config.use_cache if hasattr(self.gptq_model.model.config, "use_cache") else False
-        self.gptq_model.model.config.use_cache = False
-        layers, layers_prefix = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.extract_layers_node())
-        region_timer = getattr(self.gptq_model, "quant_region_timer", None)
+        forward_pass_use_cache = self.quant_model.model.config.use_cache if hasattr(self.quant_model.model.config, "use_cache") else False
+        self.quant_model.model.config.use_cache = False
+        layers, layers_prefix = get_module_by_name_prefix(self.quant_model.model, self.quant_model.extract_layers_node())
+        region_timer = getattr(self.quant_model, "quant_region_timer", None)
 
         for p_index, processor in enumerate(self.processors):
             if not processor.verify_calibration_dataset(p_index):
@@ -1441,12 +1441,12 @@ class ModuleLooper():
         for processor in self.processors:
             processor.release_calibration_dataset()
 
-        if self.gptq_model.quantize_config.offload_to_disk:
+        if self.quant_model.quantize_config.offload_to_disk:
             log.info("Offloading base modules to disk...")
             offload_to_disk(
-                model=self.gptq_model.model,
-                module=self.gptq_model.get_base_modules(model=self.gptq_model.model),
-                disk_path=self.gptq_model.quantize_config.offload_to_disk_path
+                model=self.quant_model.model,
+                module=self.quant_model.get_base_modules(model=self.quant_model.model),
+                disk_path=self.quant_model.quantize_config.offload_to_disk_path
             )
 
         if region_timer is not None:
@@ -1456,20 +1456,20 @@ class ModuleLooper():
         requires_activation_capture = any(
             getattr(proc, "enable_activation_capture", False) for proc in self.processors
         )
-        layer_modules = self.gptq_model.simple_layer_modules(
-            model_config=self.gptq_model.model.config,
-            quantize_config=self.gptq_model.quantize_config,
+        layer_modules = self.quant_model.simple_layer_modules(
+            model_config=self.quant_model.model.config,
+            quantize_config=self.quant_model.quantize_config,
             is_awq_quantize=is_awq_quantize,
             include_capture_only=requires_activation_capture,
         )
 
         # true-sequential will replay the quantized activations after each subset has been quantized to be used for next subset quantization
         # this should always be true for gptq unless you want lower but misleading error_loss that is misleading and will lead to lower post-quantized model
-        if not self.gptq_model.quantize_config.true_sequential:
+        if not self.quant_model.quantize_config.true_sequential:
             layer_modules = [sum(layer_modules, [])]
 
         layer_count = len(layers)
-        pb = (log.pb(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count)
+        pb = (log.pb(layer_count + 1 if self.quant_model.quantize_config.lm_head else layer_count)
                             .manual()
                             .set(left_steps_offset=1))
 
@@ -1479,12 +1479,12 @@ class ModuleLooper():
 
         shared_kv_cache_dict = {}
 
-        if self.gptq_model.quantize_config.lm_head:
-            lm_head_module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
+        if self.quant_model.quantize_config.lm_head:
+            lm_head_module = get_module(self.quant_model.model, key=self.quant_model.lm_head)
             if lm_head_module and isinstance(lm_head_module, torch.nn.Linear):
                 hooked_lm_head = HookedLinear.from_linear(lm_head_module)
-                module_path = self.gptq_model.lm_head.split('.')
-                parent = self.gptq_model.model
+                module_path = self.quant_model.lm_head.split('.')
+                parent = self.quant_model.model
                 for part in module_path[:-1]:
                     parent = getattr(parent, part)
                 setattr(parent, module_path[-1], hooked_lm_head)
@@ -1550,7 +1550,7 @@ class ModuleLooper():
 
                 finalize_start = time.perf_counter() if region_timer is not None else None
                 try:
-                    reverse_p.finalize(model=self.gptq_model, **kwargs)
+                    reverse_p.finalize(model=self.quant_model, **kwargs)
                 finally:
                     if region_timer is not None and finalize_start is not None:
                         region_timer.record(
@@ -1568,7 +1568,7 @@ class ModuleLooper():
         if region_timer is not None:
             region_timer.flush()
 
-        self.gptq_model.model.config.use_cache = forward_pass_use_cache
+        self.quant_model.model.config.use_cache = forward_pass_use_cache
 
         return total_log
 
@@ -1587,13 +1587,13 @@ class ModuleLooper():
                 subset[n], _ = get_module_by_name_prefix(module, module_name=n)
             # some modules have layer_modules that are dynamic based on config
             # ref: deepseek v2/v3/r1
-            elif self.gptq_model.layer_modules_strict:
+            elif self.quant_model.layer_modules_strict:
                 raise ValueError(f"layer module item `{n}` not found in model, please check your model config.")
             if capture_only:
                 capture_only_flags[n] = True  # forward-only modules should not be finalized
         skipped_modules = []
         for name in subset:
-            layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{layers_prefix}.{layer_index}.{name}"
+            layer_name = self.quant_model.lm_head if is_lm_head_module else f"{layers_prefix}.{layer_index}.{name}"
 
             # gptq task is created and stored inside processor
             if not isinstance(subset[name], NamedModule):

@@ -54,7 +54,7 @@ class AWQProcessor(LoopProcessor):
         calibration_concat_size: Optional[int],
         calibration_sort: Optional[str],
         batch_size: int,
-        gptq_model,
+        quant_model,
         model,
         require_fwd: bool = True,
         calculate_w_wq_diff: bool = False,
@@ -85,7 +85,7 @@ class AWQProcessor(LoopProcessor):
         self._layer_states: Dict[int, _AWQLayerState] = {}
         self._layer_states_lock = threading.Lock()
         self._scale_context = threading.local()
-        self.gptq_model = gptq_model
+        self.quant_model = quant_model
 
         # Select a default AWQ kernel for this processor (per-module overrides can still apply).
         self.qlinear_kernel = self._select_qlinear_kernel_for_format(qcfg.format)
@@ -362,7 +362,7 @@ class AWQProcessor(LoopProcessor):
         if layer_module is None and state.modules:
             sample_module = next(iter(state.modules.values()))
             layer_path = sample_module.full_name.rsplit(".", 1)[0]
-            layer_module, _ = get_module_by_name_prefix(self.gptq_model.model, layer_path)
+            layer_module, _ = get_module_by_name_prefix(self.quant_model.model, layer_path)
             state.layer_module = layer_module
 
         layer_module_ref = state.layer_module
@@ -402,7 +402,7 @@ class AWQProcessor(LoopProcessor):
         setattr(self._scale_context, "layer_index", layer_index)
         setattr(self._scale_context, "prev_scale", state.previous_weight_scale)
 
-        module_config = self.gptq_model.awq_get_modules_for_scaling(
+        module_config = self.quant_model.awq_get_modules_for_scaling(
             layer_module_ref,
             input_feat,
             module_kwargs_global,
@@ -1372,11 +1372,11 @@ class AWQProcessor(LoopProcessor):
         assert q_zeros.device == CPU
         assert q_scales.device == CPU
         quant_linear_cls = self._resolve_qlinear_kernel(module.full_name)
-        layers = find_modules(self.gptq_model.model)
+        layers = find_modules(self.quant_model.model)
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
         parent_key = getattr(module, "full_name", getattr(module, "name", None))
         # replace module with quantized module
-        timer = getattr(self.gptq_model, "quant_region_timer", None)
+        timer = getattr(self.quant_model, "quant_region_timer", None)
         create_start = time.perf_counter() if timer is not None else None
         with log_time_block(
                 "create_quant_module",
@@ -1391,11 +1391,11 @@ class AWQProcessor(LoopProcessor):
                     desc_act=self.qcfg.desc_act,
                     dynamic=self.qcfg.dynamic,
                     group_size=self.qcfg.group_size,
-                    module=self.gptq_model.model,
+                    module=self.quant_model.model,
                     submodule=module,
                     sym=self.qcfg.sym,
                     device=self.qcfg.device,
-                    lm_head_name=self.gptq_model.lm_head,
+                    lm_head_name=self.quant_model.lm_head,
                     pack_dtype=self.qcfg.pack_dtype,
                     register_buffers=False,
                 )
@@ -1408,7 +1408,7 @@ class AWQProcessor(LoopProcessor):
         # pack module
         qModules = {
             name: submodule
-            for name, submodule in find_modules(self.gptq_model.model, [quant_linear_cls]).items()
+            for name, submodule in find_modules(self.quant_model.model, [quant_linear_cls]).items()
             if name == module.full_name
         }
         pack_start = time.perf_counter() if timer is not None else None

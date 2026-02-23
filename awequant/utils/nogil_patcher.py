@@ -11,7 +11,7 @@ from packaging.version import InvalidVersion, Version
 from .safe import ThreadSafe
 
 
-_PATCHED_ATTR = "_gptqmodel_locked_save_file"
+_PATCHED_ATTR = "_awequant_locked_save_file"
 
 TRITON_MIN_VERSION_STR = "3.5.0"
 # Alternate distribution names used by Windows and XPU builds.
@@ -68,7 +68,7 @@ def patch_triton_autotuner() -> None:
             return
 
     autotuner_cls = module.Autotuner
-    if getattr(autotuner_cls, "_gptqmodel_threadsafe", False):
+    if getattr(autotuner_cls, "_awequant_threadsafe", False):
         return
 
     builtins_mod = module.builtins
@@ -256,4 +256,4 @@ def patch_triton_autotuner() -> None:
     autotuner_cls.check_disk_cache = patched_check_disk_cache
     autotuner_cls._get_config_for_key = _get_config_for_key
     autotuner_cls.run = patched_run
-    autotuner_cls._gptqmodel_threadsafe = True
+    autotuner_cls._awequant_threadsafe = True

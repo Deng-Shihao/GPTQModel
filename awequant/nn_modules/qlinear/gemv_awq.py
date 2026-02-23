@@ -13,7 +13,7 @@ from ...utils.logger import setup_logger
 
 log = setup_logger()
 
-awq_ext, msg = try_import("gptqmodel_awq_kernels")
+awq_ext, msg = try_import("awequant_awq_kernels")
 
 class AwqGEMVQuantLinear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GEMV]

@@ -20,7 +20,7 @@ from ..utils.safe import ThreadSafe
 from ..utils.torch import ALL_DEVICES, CPU, torch_sync
 
 
-USE_TORCH_REPLICATE = env_flag("GPTQMODEL_USE_TORCH_REPLICATE", True)
+USE_TORCH_REPLICATE = env_flag("AWEQUANT_USE_TORCH_REPLICATE", True)
 
 
 _THREAD_SAFE_PARALLEL = ThreadSafe(torch_parallel)
@@ -280,7 +280,7 @@ def clone_module_for_devices(
         module.eval()
         rehome_module_to_device(module, target_device, move_parameters=True, move_buffers=True)
         clear_state_fn(module)
-        setattr(module, "_gptqmodule_device_hint", target_device)
+        setattr(module, "_awequant_device_hint", target_device)
         _record(step_name, start_ts)
 
     use_replicate = (
@@ -305,7 +305,7 @@ def clone_module_for_devices(
                 replica.eval()
                 rehome_module_to_device(replica, dev, move_parameters=True, move_buffers=True)
                 clear_state_fn(replica)
-                setattr(replica, "_gptqmodule_device_hint", dev)
+                setattr(replica, "_awequant_device_hint", dev)
                 clones[dev] = replica
                 _notify(idx, dev, "replica")
 
@@ -336,7 +336,7 @@ def clone_module_for_devices(
         replica.eval()
         rehome_module_to_device(replica, dev, move_parameters=True, move_buffers=True)
         clear_state_fn(replica)
-        setattr(replica, "_gptqmodule_device_hint", dev)
+        setattr(replica, "_awequant_device_hint", dev)
         clones[dev] = replica
         _record(str(dev), start_ts)
         _notify(idx, dev, "clone")
@@ -362,7 +362,7 @@ def forward_batch_worker(
     prev_kv,
 ):
     processor._set_current_batch_index(batch_index)
-    module_device = getattr(module, "_gptqmodule_device_hint", None) or get_device(module)
+    module_device = getattr(module, "_awequant_device_hint", None) or get_device(module)
     # TODO: rehome was done during cloning, is it still needed there?
     rehome_module_to_device(module, module_device, move_parameters=True, move_buffers=True)
 

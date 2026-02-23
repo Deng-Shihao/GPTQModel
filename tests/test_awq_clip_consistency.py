@@ -16,7 +16,7 @@ class _ClipTestAWQProcessor(AWQProcessor):
             calibration_concat_size=None,
             calibration_sort=None,
             batch_size=1,
-            gptq_model=None,
+            quant_model=None,
             model=None,
             require_fwd=True,
             calculate_w_wq_diff=False,

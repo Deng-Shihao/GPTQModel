@@ -13,7 +13,7 @@ from ...utils.logger import setup_logger
 
 log = setup_logger()
 
-awq_v2_ext, msg = try_import("gptqmodel_awq_v2_kernels")
+awq_v2_ext, msg = try_import("awequant_awq_v2_kernels")
 
 
 def pack_intweight(unpacked_qweight, interleave, kstride):

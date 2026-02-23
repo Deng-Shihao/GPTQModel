@@ -13,7 +13,7 @@ from ...quantization.awq.utils.utils import get_best_device
 from ...utils.backend import BACKEND
 
 
-awq_ext, msg = try_import("gptqmodel_awq_kernels")
+awq_ext, msg = try_import("awequant_awq_kernels")
 
 
 class AwqGemmFn(torch.autograd.Function):

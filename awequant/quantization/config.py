@@ -33,11 +33,11 @@ META_FIELD = "meta"
 META_FIELD_QUANTIZER = "quantizer"
 
 META_QUANTIZER_AWEQUANT = "awequant"
-META_QUANTIZER_GPTQMODEL = "gptqmodel"
+META_QUANTIZER_AWEQUANT = "awequant"
 
 META_FIELD_URI = "uri"
 META_VALUE_URI = "https://github.com/ModelCloud/AweQuant"
-META_VALUE_URI_LEGACY = "https://github.com/modelcloud/gptqmodel"
+META_VALUE_URI_LEGACY = "https://github.com/modelcloud/awequant"
 
 META_FIELD_DAMP_PERCENT = "damp_percent"
 META_FIELD_DAMP_AUTO_INCREMENT = "damp_auto_increment"

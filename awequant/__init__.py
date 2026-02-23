@@ -1,37 +1,68 @@
-"""Canonical import path for AweQuant with backward compatibility."""
 
-from __future__ import annotations
-
-import importlib
+import os
 
 
-_gptqmodel = importlib.import_module("gptqmodel")
+# isort: off
+from .utils.nogil_patcher import patch_safetensors_save_file, patch_triton_autotuner  # noqa: E402
+# isort: on
 
-AweQuant = _gptqmodel.AweQuant
-GPTQModel = _gptqmodel.GPTQModel
-BaseQuantizeConfig = _gptqmodel.BaseQuantizeConfig
-QuantizeConfig = _gptqmodel.QuantizeConfig
-BACKEND = _gptqmodel.BACKEND
-DEBUG_ON = _gptqmodel.DEBUG_ON
-DEVICE_THREAD_POOL = _gptqmodel.DEVICE_THREAD_POOL
-exllama_set_max_input_length = _gptqmodel.exllama_set_max_input_length
-get_best_device = _gptqmodel.get_best_device
-ASCII_LOGO = _gptqmodel.ASCII_LOGO
-__version__ = _gptqmodel.__version__
+patch_safetensors_save_file()
 
-# Reuse legacy package path so submodule imports like `awequant.quantization` resolve.
-__path__ = _gptqmodel.__path__
+# TODO: waiting for official fix from triton
+#  monkeypatching triton threading issues is fragile
+try:
+    patch_triton_autotuner()
+except Exception:
+    pass
 
-__all__ = [
-    "AweQuant",
-    "GPTQModel",
-    "BaseQuantizeConfig",
-    "QuantizeConfig",
-    "BACKEND",
-    "DEBUG_ON",
-    "DEVICE_THREAD_POOL",
-    "exllama_set_max_input_length",
-    "get_best_device",
-    "ASCII_LOGO",
-    "__version__",
-]
+from .utils.env import env_flag
+from .utils.logger import setup_logger
+from .utils.modelscope import ensure_modelscope_available
+
+
+DEBUG_ON = env_flag("DEBUG")
+
+from .utils.linalg_warmup import run_torch_linalg_warmup
+from .utils.threadx import DeviceThreadPool
+
+
+DEVICE_THREAD_POOL = DeviceThreadPool(
+    inference_mode=True,
+    warmups={
+        "cuda": run_torch_linalg_warmup,
+        "xpu": run_torch_linalg_warmup,
+        "mps": run_torch_linalg_warmup,
+        "cpu": run_torch_linalg_warmup,
+    },
+    workers={
+        "cuda:per": 4,
+        "xpu:per": 1,
+        "mps": 8,
+        "cpu": min(12, max(1, (os.cpu_count() or 1) + 1 // 2)), # count + 1, fixed pool size > 1 check when count=3
+        "model_loader:cpu": 2,
+    },
+    empty_cache_every_n=512,
+)
+
+from .models import AweQuant, get_best_device
+from .models.auto import ASCII_LOGO
+from .quantization import BaseQuantizeConfig, QuantizeConfig
+from .utils import BACKEND
+from .version import __version__
+
+
+def exllama_set_max_input_length(*_args, **_kwargs):
+    raise NotImplementedError("AWQ-only build does not support ExLlama backends.")
+
+
+setup_logger().info("\n%s", ASCII_LOGO)
+
+
+if ensure_modelscope_available():
+    try:
+        from modelscope.utils.hf_util.patcher import patch_hub
+        patch_hub()
+    except Exception as exc:
+        raise ModuleNotFoundError(
+            "env `AWEQUANT_USE_MODELSCOPE` used but modelscope pkg is not found: please install with `pip install modelscope`."
+        ) from exc

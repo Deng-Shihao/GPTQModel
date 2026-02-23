@@ -73,7 +73,7 @@ def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
 
     global _PACK_BLOCK_EXTENSION, _PACK_BLOCK_EXTENSION_INITIALISED
 
-    if hasattr(torch.ops.gptqmodel, "pack_block_cpu"):
+    if hasattr(torch.ops.awequant, "pack_block_cpu"):
         _PACK_BLOCK_EXTENSION_INITIALISED = True
         _PACK_BLOCK_EXTENSION = True
         return _PACK_BLOCK_EXTENSION
@@ -82,14 +82,14 @@ def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
         return _PACK_BLOCK_EXTENSION
 
     try:
-        spec = importlib.util.find_spec("gptqmodel_pack_block_cpu")
+        spec = importlib.util.find_spec("awequant_pack_block_cpu")
     except (ModuleNotFoundError, AttributeError):
         spec = None
 
     if spec and spec.origin:
         try:
             torch.ops.load_library(spec.origin)
-            if hasattr(torch.ops.gptqmodel, "pack_block_cpu"):
+            if hasattr(torch.ops.awequant, "pack_block_cpu"):
                 log.debug("pack_block_cpu extension loaded from %s", spec.origin)
                 _PACK_BLOCK_EXTENSION = True
                 _PACK_BLOCK_EXTENSION_INITIALISED = True
@@ -100,7 +100,7 @@ def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
     project_root = Path(__file__).resolve().parents[2]
     source_path = project_root / "pack_block_cpu.cpp"
     if not source_path.exists():
-        source_path = project_root / "gptqmodel_ext" / "pack_block_cpu.cpp"
+        source_path = project_root / "awequant_ext" / "pack_block_cpu.cpp"
     if not source_path.exists():
         log.debug("pack_block_cpu extension source not found at %s", source_path)
         _PACK_BLOCK_EXTENSION = None
@@ -110,14 +110,14 @@ def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
     extra_cflags = ["-O3", "-std=c++17"]
     extra_ldflags: list[str] = []
 
-    build_dir = os.getenv("GPTQMODEL_EXT_BUILD")
+    build_dir = os.getenv("AWEQUANT_EXT_BUILD")
 
     if not verbose:
-        verbose = env_flag("GPTQMODEL_EXT_VERBOSE", True)
+        verbose = env_flag("AWEQUANT_EXT_VERBOSE", True)
 
     try:
         safe_load_cpp_ext(
-            name="gptqmodel_pack_block_cpu",
+            name="awequant_pack_block_cpu",
             sources=[str(source_path)],
             extra_cflags=extra_cflags,
             extra_ldflags=extra_ldflags,

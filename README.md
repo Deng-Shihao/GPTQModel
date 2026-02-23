@@ -1,7 +1,7 @@
 # AweQuant (AWQ-Only)
 
 This fork is intentionally simplified to support **AWQ quantization only**.
-Preferred import path is `awequant` (legacy `gptqmodel` imports remain compatible).
+Import path: `awequant`.
 
 ## Scope
 

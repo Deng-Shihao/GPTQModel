@@ -27,7 +27,7 @@ class StageInputsCapture:
 
     def __init__(self, looper: ModuleLooper, logger=None) -> None:
         self.looper = looper
-        self.gptq_model = looper.gptq_model
+        self.quant_model = looper.quant_model
         self.logger = logger or setup_logger()
 
     def cache_inputs(
@@ -41,7 +41,7 @@ class StageInputsCapture:
         position_ids: List[torch.Tensor] = []
         layer_input_kwargs: List[Dict[str, Any]] = []
 
-        timer = getattr(self.gptq_model, "quant_region_timer", None)
+        timer = getattr(self.quant_model, "quant_region_timer", None)
         layer_label = None
         if layers:
             first_layer = layers[0]
@@ -73,7 +73,7 @@ class StageInputsCapture:
         # TODO: move back outputs to CPU after forward pass to minimize VRAM usage for other layers
         # or wait till calibration_data_device feature merge, when we can specify device for calibration data (or balanced)
         # (and in case calibration data device will be the same as forward pass device save some ticks)
-        layers[0] = self.gptq_model.shell_module_materialize(
+        layers[0] = self.quant_model.shell_module_materialize(
             target_submodule=layers[0],
             device=CPU,
         )
@@ -128,33 +128,33 @@ class StageInputsCapture:
             raise STOP_FORWARD_EXCEPTION
 
         ori_outside_layer_module_devices: Dict[str, torch.device] = {}
-        for module_name in self.gptq_model.get_base_modules(self.gptq_model.model):
-            module, _ = get_module_by_name_prefix(self.gptq_model.model, [module_name])
+        for module_name in self.quant_model.get_base_modules(self.quant_model.model):
+            module, _ = get_module_by_name_prefix(self.quant_model.model, [module_name])
 
             if module is None:
                 continue
 
             m_device = get_device(module)
             ori_outside_layer_module_devices[module_name] = CPU if m_device == META else m_device
-            self.gptq_model.shell_module_materialize(
+            self.quant_model.shell_module_materialize(
                 target_submodule=module,
                 device=cur_layer_device,
             )
 
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
 
-        is_ovis = self.gptq_model.model.config.model_type == "ovis"
+        is_ovis = self.quant_model.model.config.model_type == "ovis"
 
-        self.gptq_model.pre_quantize_generate_hook_start()
+        self.quant_model.pre_quantize_generate_hook_start()
 
-        # TODO: why data_device sometimes set to cuda (self.gptq_model.quantize_config.device) and sometimes to CPU (cur_layer_device)?
+        # TODO: why data_device sometimes set to cuda (self.quant_model.quantize_config.device) and sometimes to CPU (cur_layer_device)?
         try:
             for batch_index, example in enumerate(calibration_data, start=1):
-                if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
-                    data_device = self.gptq_model.quantize_config.device
+                if self.quant_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
+                    data_device = self.quant_model.quantize_config.device
                 else:
                     data_device = (
-                        self.gptq_model.quantize_config.device
+                        self.quant_model.quantize_config.device
                         if "pixel_values" in example.keys()
                         else cur_layer_device
                     )
@@ -164,7 +164,7 @@ class StageInputsCapture:
                             if len(v[index].shape) == 1:
                                 v[index] = v[index].unsqueeze(0)
                             v[index] = move_to(
-                                v[index].to(self.gptq_model.model.visual_tokenizer.dtype)
+                                v[index].to(self.quant_model.model.visual_tokenizer.dtype)
                                 if is_ovis
                                 else v[index],
                                 device=data_device,
@@ -174,22 +174,22 @@ class StageInputsCapture:
                             v = v.unsqueeze(0)
                         example[k] = move_to(v, device=data_device)
                 try:
-                    if self.gptq_model.ATTENTION_MASKS_DTYPE is torch.long:
+                    if self.quant_model.ATTENTION_MASKS_DTYPE is torch.long:
                         example["attention_mask"] = example["attention_mask"].long()
 
                     with ctx(
-                        DEVICE_THREAD_POOL.read_lock(self.gptq_model.quantize_config.device),
-                        device_ctx(self.gptq_model.quantize_config.device),
+                        DEVICE_THREAD_POOL.read_lock(self.quant_model.quantize_config.device),
+                        device_ctx(self.quant_model.quantize_config.device),
                     ):
-                        if self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS:
-                            self.gptq_model.model.generate(
+                        if self.quant_model.INPUT_EMBEDDING_EXTRA_ARGS:
+                            self.quant_model.model.generate(
                                 **example,
-                                **self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS,
+                                **self.quant_model.INPUT_EMBEDDING_EXTRA_ARGS,
                             )
                         elif is_ovis:
-                            self.gptq_model.model.generate(inputs=example.pop("input_ids"), **example)
+                            self.quant_model.model.generate(inputs=example.pop("input_ids"), **example)
                         else:
-                            self.gptq_model.model(**example, use_cache=use_cache)
+                            self.quant_model.model(**example, use_cache=use_cache)
                 except StopForward:
                     pass
                 finally:
@@ -212,7 +212,7 @@ class StageInputsCapture:
             if cache_forward_pb is not None:
                 cache_forward_pb.close()
 
-        self.gptq_model.pre_quantize_generate_hook_end()
+        self.quant_model.pre_quantize_generate_hook_end()
         handle.remove()
 
         result = InputCache(

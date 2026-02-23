@@ -80,10 +80,10 @@ def _run_single_subset_pass(
     
     # Determine MoE block name for hook selection
     moe_block_name = None
-    if looper.gptq_model and hasattr(looper.gptq_model, 'moe_lifecycle_hooks'):
-        hooks = looper.gptq_model.moe_lifecycle_hooks
+    if looper.quant_model and hasattr(looper.quant_model, 'moe_lifecycle_hooks'):
+        hooks = looper.quant_model.moe_lifecycle_hooks
         if hooks is not None:
-            moe_block = hooks.get_moe_block(module, looper.gptq_model.__class__)
+            moe_block = hooks.get_moe_block(module, looper.quant_model.__class__)
             if moe_block is not None:
                 # Get the full name/path of the MoE block
                 for mod_name, mod in module.named_modules():
@@ -245,7 +245,7 @@ def _run_single_subset_pass(
             subset[name].forward_hook = None
             subset[name].forward_hook_last = False
 
-    if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
+    if looper.quant_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
         torch_sync()
         torch_empty_cache()
     moe_skip_modules = []
@@ -325,7 +325,7 @@ def _run_single_subset_pass(
                 f"module weight on {actual_device}, thread target {target_device}."
             )
 
-        timer = getattr(looper.gptq_model, "quant_region_timer", None)
+        timer = getattr(looper.quant_model, "quant_region_timer", None)
         start = time.perf_counter() if timer else None
         try:
             if DEBUG_ON and logger.isEnabledFor(logging.DEBUG):
@@ -393,7 +393,7 @@ def _run_single_subset_pass(
         processed_subset[name] = named_module
     torch_sync()
 
-    if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
+    if looper.quant_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
         torch_empty_cache()
 
     if subset_event_cb:
@@ -544,7 +544,7 @@ def run_subset_stage(
             setattr(named_module, "moe_enabled", False)
 
     auto_forward_data_parallel = getattr(
-        looper.gptq_model.quantize_config,
+        looper.quant_model.quantize_config,
         "auto_forward_data_parallel",
         True,
     )
@@ -572,7 +572,7 @@ def run_subset_stage(
     
     # Check for MoE batching
     # batch_size is only available when using ExpertsRoutingBypass routing strategy
-    moe_routing = looper.gptq_model.quantize_config.moe
+    moe_routing = looper.quant_model.quantize_config.moe
     batch_size = None
     if moe_routing is not None and isinstance(moe_routing.routing, ExpertsRoutingBypass):
         batch_size = moe_routing.routing.batch_size
@@ -643,7 +643,7 @@ def run_subset_stage(
             processed_results.update(chunk_result)
             
             # Force cleanup between chunks
-            if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
+            if looper.quant_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
                  torch_empty_cache()
 
         # Close MOE chunks progress bar

@@ -557,7 +557,7 @@ http = [
 ]
 
 [[package]]
-name = "gptqmodel"
+name = "awequant"
 source = { editable = "." }
 dependencies = [
     { name = "accelerate" },

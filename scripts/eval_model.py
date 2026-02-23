@@ -245,7 +245,7 @@ def main() -> None:
     chat_template_tasks = {_resolve_task(name).value for name in _split_tasks(args.chat_template_tasks)}
 
     # Keep legacy backend id for compatibility with existing eval wrappers.
-    llm_backend = "vllm" if args.use_vllm else "gptqmodel"
+    llm_backend = "vllm" if args.use_vllm else "awequant"
     backend: awequant.BACKEND = args.backend
 
     load_kwargs = _parse_key_value_pairs(args.load_arg)

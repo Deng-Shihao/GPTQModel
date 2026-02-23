@@ -640,12 +640,12 @@ def simple_dispatch_model(model, device_map):
 
 
 # public/stable api exposed to transformer/optimum
-def hf_gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None,
+def hf_awequant_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None,
                         max_input_length: Optional[int] = None):
-    return gptqmodel_post_init(model, use_act_order, quantize_config, max_input_length)
+    return awequant_post_init(model, use_act_order, quantize_config, max_input_length)
 
 
-def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None,
+def awequant_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None,
                         max_input_length: Optional[int] = None):
     # AWQ-only build keeps post-init minimal: every quant linear handles its own setup.
     _ = use_act_order, quantize_config, max_input_length

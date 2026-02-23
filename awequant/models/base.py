@@ -709,7 +709,7 @@ class BaseQModel(nn.Module):
         os.environ["AWQ_BATCH_SIZE"] = str(batch_size)
 
         awq_args = dict(args)
-        awq_args["gptq_model"] = self
+        awq_args["quant_model"] = self
         awq_args["model"] = self.model
         awq_args["batch_size"] = batch_size
 
@@ -1148,7 +1148,7 @@ class BaseQModel(nn.Module):
             return 0
 
         default_bytes = 512 * 1024 ** 2 #512MB
-        raw = os.getenv("GPTQMODEL_RELOAD_THRESHOLD")
+        raw = os.getenv("AWEQUANT_RELOAD_THRESHOLD")
         if raw is None or raw.strip() == "":
             return default_bytes
 
@@ -1167,7 +1167,7 @@ class BaseQModel(nn.Module):
         match = re.match(r"^([0-9]*\.?[0-9]+)\s*([a-z]*)$", value)
         if match is None:
             log.warn(
-                "GPTQMODEL_RELOAD_THRESHOLD value `%s` is invalid; defaulting to 512MB.",
+                "AWEQUANT_RELOAD_THRESHOLD value `%s` is invalid; defaulting to 512MB.",
                 raw,
             )
             return default_bytes
@@ -1177,7 +1177,7 @@ class BaseQModel(nn.Module):
         multiplier = units.get(unit, None)
         if multiplier is None:
             log.warn(
-                "GPTQMODEL_RELOAD_THRESHOLD unit `%s` is unsupported; defaulting to bytes.",
+                "AWEQUANT_RELOAD_THRESHOLD unit `%s` is unsupported; defaulting to bytes.",
                 unit,
             )
             multiplier = 1

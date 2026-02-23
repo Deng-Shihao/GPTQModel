@@ -112,22 +112,22 @@ def _detect_cxx11_abi():
 
 
 version_vars = {}
-exec("exec(open('gptqmodel/version.py').read()); version=__version__", {}, version_vars)
-gptqmodel_version = version_vars["version"]
+exec("exec(open('awequant/version.py').read()); version=__version__", {}, version_vars)
+awequant_version = version_vars["version"]
 
 TORCH_VERSION = _detect_torch_version()
 ROCM_VERSION = _detect_rocm_version()
 CUDA_VERSION = _detect_cuda_version()
-FORCE_BUILD = _bool_env("GPTQMODEL_FORCE_BUILD", default=False)
+FORCE_BUILD = _bool_env("AWEQUANT_FORCE_BUILD", default=False)
 
 build_cuda_ext = _read_env("BUILD_CUDA_EXT")
 if build_cuda_ext is None:
     build_cuda_ext = "1" if (CUDA_VERSION or ROCM_VERSION) else "0"
 
-build_awq = _bool_env("GPTQMODEL_BUILD_AWQ", default=True)
-build_awq_v2 = _bool_env("GPTQMODEL_BUILD_AWQ_V2", default=True)
+build_awq = _bool_env("AWEQUANT_BUILD_AWQ", default=True)
+build_awq_v2 = _bool_env("AWEQUANT_BUILD_AWQ_V2", default=True)
 
-include_dirs = ["gptqmodel_ext"]
+include_dirs = ["awequant_ext"]
 ext_modules = []
 cmdclass = {}
 
@@ -137,8 +137,8 @@ if build_cuda_ext == "1":
     except Exception as exc:
         if FORCE_BUILD:
             raise RuntimeError(
-                "GPTQMODEL_FORCE_BUILD=1 but torch cpp_extension is unavailable. "
-                "Install torch with C++ extension support or unset GPTQMODEL_FORCE_BUILD."
+                "AWEQUANT_FORCE_BUILD=1 but torch cpp_extension is unavailable. "
+                "Install torch with C++ extension support or unset AWEQUANT_FORCE_BUILD."
             ) from exc
         cpp_ext = None
         print("Warning: torch cpp_extension is unavailable, skipping CUDA extension build.")
@@ -176,11 +176,11 @@ if build_cuda_ext == "1":
             if build_awq:
                 ext_modules.append(
                     cpp_ext.CUDAExtension(
-                        "gptqmodel_awq_kernels",
+                        "awequant_awq_kernels",
                         [
-                            "gptqmodel_ext/awq/pybind_awq.cpp",
-                            "gptqmodel_ext/awq/quantization/gemm_cuda_gen.cu",
-                            "gptqmodel_ext/awq/quantization/gemv_cuda.cu",
+                            "awequant_ext/awq/pybind_awq.cpp",
+                            "awequant_ext/awq/quantization/gemm_cuda_gen.cu",
+                            "awequant_ext/awq/quantization/gemv_cuda.cu",
                         ],
                         extra_compile_args=extra_compile_args,
                     )
@@ -189,11 +189,11 @@ if build_cuda_ext == "1":
                 if build_awq_v2:
                     ext_modules.append(
                         cpp_ext.CUDAExtension(
-                            "gptqmodel_awq_v2_kernels",
+                            "awequant_awq_v2_kernels",
                             [
-                                "gptqmodel_ext/awq/pybind_awq_v2.cpp",
-                                "gptqmodel_ext/awq/quantization_new/gemv/gemv_cuda.cu",
-                                "gptqmodel_ext/awq/quantization_new/gemm/gemm_cuda.cu",
+                                "awequant_ext/awq/pybind_awq_v2.cpp",
+                                "awequant_ext/awq/quantization_new/gemv/gemv_cuda.cu",
+                                "awequant_ext/awq/quantization_new/gemm/gemm_cuda.cu",
                             ],
                             extra_compile_args=extra_compile_args,
                         )
@@ -202,13 +202,13 @@ if build_cuda_ext == "1":
         if ext_modules:
             cmdclass["build_ext"] = cpp_ext.BuildExtension
 
-print(f"gptqmodel_version={gptqmodel_version}")
+print(f"awequant_version={awequant_version}")
 print(f"BUILD_CUDA_EXT={build_cuda_ext} CUDA_VERSION={CUDA_VERSION} ROCM_VERSION={ROCM_VERSION}")
 print(f"TORCH_VERSION={TORCH_VERSION}")
 print(f"Extensions={[ext.name for ext in ext_modules]}")
 
 setup(
-    version=gptqmodel_version,
+    version=awequant_version,
     packages=find_packages(),
     include_package_data=True,
     include_dirs=include_dirs,

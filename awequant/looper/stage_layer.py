@@ -52,7 +52,7 @@ def run_layer_stage(
 
         if is_lm_head_module:
             layer_title = "Quantizing lm_head"
-            module = get_module(looper.gptq_model.model, key=looper.gptq_model.lm_head)
+            module = get_module(looper.quant_model.model, key=looper.quant_model.lm_head)
         else:
             layer_title = f"Quantizing layer {layer_index} of {layer_count - 1}"
             module = layers[layer_index]
@@ -63,17 +63,17 @@ def run_layer_stage(
             # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
             continue
 
-        module = looper.gptq_model.pre_quantize(module)
+        module = looper.quant_model.pre_quantize(module)
 
         if is_lm_head_module:
-            layer_descriptor = looper.gptq_model.lm_head
+            layer_descriptor = looper.quant_model.lm_head
         else:
-            model_type = looper.gptq_model.model.config.model_type
+            model_type = looper.quant_model.model.config.model_type
             if model_type in MODULE_CONVERTER_MAP:
                 converter = MODULE_CONVERTER_MAP[model_type]
-                module = converter(module, looper.gptq_model.model.config)
+                module = converter(module, looper.quant_model.model.config)
 
-            replace_module_with_hooked_legacy(module, quant_lm_head=looper.gptq_model.quantize_config.lm_head)
+            replace_module_with_hooked_legacy(module, quant_lm_head=looper.quant_model.quantize_config.lm_head)
 
             layers[layer_index] = module
 
@@ -83,7 +83,7 @@ def run_layer_stage(
                 layer_descriptor = str(layer_index)
 
         cur_layer_device = get_device(module)
-        full = find_modules(module, name=looper.gptq_model.lm_head if is_lm_head_module else "")
+        full = find_modules(module, name=looper.quant_model.lm_head if is_lm_head_module else "")
 
         for p_index, processor in enumerate(looper.processors):
             # Each processor contributes a quantization phase; walk them in
@@ -91,7 +91,7 @@ def run_layer_stage(
             processor.log_call_count = 0  # reset
             processor.collect_memory_info(layer_index)
 
-            modules = [[looper.gptq_model.lm_head]] if is_lm_head_module else layer_modules
+            modules = [[looper.quant_model.lm_head]] if is_lm_head_module else layer_modules
 
             # for NativeProcessor we process one time forward on all grouped module subsets
             if processor.fwd_all_modules_in_single_pass:
@@ -100,7 +100,7 @@ def run_layer_stage(
 
             layer_inputs = processor.inputs_cache.layer_inputs
             if is_lm_head_module and layer_inputs:
-                layer_inputs = looper.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
+                layer_inputs = looper.quant_model.lm_head_pre_quantize_generate_hook(layer_inputs)
             layer_input_kwargs = processor.inputs_cache.layer_input_kwargs
             position_ids = processor.inputs_cache.position_ids
             attention_masks = processor.inputs_cache.attention_masks
@@ -304,9 +304,9 @@ def run_layer_stage(
                 torch_sync()
 
                 if not is_lm_head_module:
-                    layers[layer_index] = looper.gptq_model.post_quantize(module)
+                    layers[layer_index] = looper.quant_model.post_quantize(module)
                 else:
-                    looper.gptq_model.post_quantize(module)
+                    looper.quant_model.post_quantize(module)
 
                 for finalized in processed_subset.values():
                     # Reset finalized modules to CPU to guarantee deterministic
@@ -371,17 +371,17 @@ def run_layer_stage(
                             logger=log,
                             module_name=resolved_label,
                         ):
-                            process.submodule_finalize(module, looper.gptq_model)
+                            process.submodule_finalize(module, looper.quant_model)
 
                         # Disk offload (lifecycle TODO note preserved)
                         if isinstance(process, AWQProcessor):
-                            quant_config = getattr(looper.gptq_model, "quantize_config", None)
+                            quant_config = getattr(looper.quant_model, "quantize_config", None)
                             if quant_config and getattr(quant_config, "offload_to_disk", False):
                                 offload_path = getattr(quant_config, "offload_to_disk_path", None)
                                 if offload_path:
                                     module_full_name = getattr(module, "full_name", None)
                                     target_module = (
-                                        looper.gptq_model.model.get_submodule(module_full_name)
+                                        looper.quant_model.model.get_submodule(module_full_name)
                                         if module_full_name
                                         else module
                                     )
@@ -392,7 +392,7 @@ def run_layer_stage(
                                         module_name=resolved_label,
                                     ):
                                         offload_to_disk(
-                                            model=looper.gptq_model.model,
+                                            model=looper.quant_model.model,
                                             module=target_module,
                                             disk_path=offload_path,
                                         )
@@ -519,7 +519,7 @@ def run_layer_stage(
                         )
 
                 if finalize_futures_snapshot:
-                    if looper.gptq_model.quantize_config.wait_for_submodule_finalizers:
+                    if looper.quant_model.quantize_config.wait_for_submodule_finalizers:
                         # Synchronous: wait for all finalization to complete before proceeding to next layer
                         # This ensures all packing and writing tasks are done
                         _drain_finalize_futures(
@@ -528,7 +528,7 @@ def run_layer_stage(
                             finalize_count,
                             layer_index,
                         )
-                        if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
+                        if looper.quant_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
                             torch_empty_cache()
                     else:
                         # Asynchronous (current/default behavior): drain in background thread

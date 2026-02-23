@@ -37,7 +37,7 @@ from ..utils.model import (
     find_modules,
     get_checkpoints,
     get_module_by_name_prefix,
-    gptqmodel_post_init,
+    awequant_post_init,
     load_checkpoint_in_model_then_tie_weights,
     make_quant,
     simple_dispatch_model,
@@ -384,7 +384,7 @@ def ModelLoader(cls):
 
         possible_model_basenames = [
             f"awq_model-{qcfg.bits}bit-{qcfg.group_size}g",
-            f"gptq_model-{qcfg.bits}bit-{qcfg.group_size}g",
+            f"quant_model-{qcfg.bits}bit-{qcfg.group_size}g",
             "model",
         ]
 
@@ -733,7 +733,7 @@ def ModelLoader(cls):
             model.seqlen = 4096
 
         # Any post-initialization that require device information, for example buffers initialization on device.
-        model = gptqmodel_post_init(model, use_act_order=qcfg.desc_act, quantize_config=qcfg)
+        model = awequant_post_init(model, use_act_order=qcfg.desc_act, quantize_config=qcfg)
 
         model.eval()
 

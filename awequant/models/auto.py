@@ -243,5 +243,3 @@ class AweQuant:
         raise NotImplementedError("AWQ-only quantization build does not include Hub upload helpers.")
 
 
-# Backward-compat alias for legacy public API.
-GPTQModel = AweQuant

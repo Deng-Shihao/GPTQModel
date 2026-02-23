@@ -6,13 +6,13 @@ from typing import Final
 from .env import env_flag
 
 
-_ENV_VAR: Final[str] = "GPTQMODEL_USE_MODELSCOPE"
+_ENV_VAR: Final[str] = "AWEQUANT_USE_MODELSCOPE"
 
 
 def modelscope_requested() -> bool:
     """
     Return ``True`` when the user explicitly enabled ModelScope integration
-    via the GPTQMODEL_USE_MODELSCOPE environment variable.
+    via the AWEQUANT_USE_MODELSCOPE environment variable.
     """
     return env_flag(_ENV_VAR, default="0")
 
@@ -36,7 +36,7 @@ def ensure_modelscope_available() -> bool:
         import modelscope  # noqa: F401
     except Exception as exc:
         raise ModuleNotFoundError(
-            "env `GPTQMODEL_USE_MODELSCOPE` used but modelscope pkg is not found: "
+            "env `AWEQUANT_USE_MODELSCOPE` used but modelscope pkg is not found: "
             "please install with `pip install modelscope`."
         ) from exc
 
