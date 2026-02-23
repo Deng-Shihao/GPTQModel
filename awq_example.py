@@ -17,7 +17,6 @@ quant_config = QuantizeConfig(
     group_size=128,
     quant_method=METHOD.AWQ,
     format=FORMAT.GEMM,
-    sym=False,
 )
 
 model = AweQuant.load(model_id, quantize_config=quant_config)
